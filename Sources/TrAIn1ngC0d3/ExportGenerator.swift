@@ -1,11 +1,14 @@
 import Foundation
+#if os(macOS)
+import AppKit
+#endif
 
 @MainActor
 class ExportGenerator {
     private let model: FileSystemModel
-    private let outputFormat: ExportConfig.OutputFormat
+    private let outputFormat: OutputFormat
     
-    init(model: FileSystemModel, outputFormat: ExportConfig.OutputFormat) {
+    init(model: FileSystemModel, outputFormat: OutputFormat) {
         self.model = model
         self.outputFormat = outputFormat
     }
@@ -53,9 +56,20 @@ class ExportGenerator {
         
         do {
             try content.write(to: fileURL, atomically: true, encoding: .utf8)
+            #if os(macOS)
+            NSWorkspace.shared.open(tempDir) // Reveal in Finder
+            if let sound = NSSound(named: NSSound.Name("Basso")) {
+                sound.play()
+            }
+            #endif
             return fileURL
         } catch {
-            print("Error writing export file: \(error)")
+            print("Export error: \(error.localizedDescription)")
+            #if os(macOS)
+            if let sound = NSSound(named: NSSound.Name("Basso")) {
+                sound.play()
+            }
+            #endif
             return nil
         }
     }

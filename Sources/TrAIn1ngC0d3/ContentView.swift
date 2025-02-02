@@ -4,32 +4,24 @@ import Foundation
 
 struct ContentView: View {
     @StateObject private var fileSystem = FileSystemModel()
-    @State private var showHiddenFiles = false {
-        didSet {
-            fileSystem.config.showHiddenFiles = showHiddenFiles
-            fileSystem.refreshFileList()
-        }
-    }
     @State private var includeImages = true
-    @State private var outputFormat: ExportConfig.OutputFormat = .markdown
+    @State private var outputFormat: OutputFormat = .markdown
     @State private var showSummarySheet = false
     @State private var currentSummaryFileName = ""
     @State private var currentSummaryContent = ""
     @State private var isEditingSummary = false
-    @State private var showImportDialog = false
     @State private var isGeneratingSummary = false
+    @State private var selectedFile: FileItem = FileItem(name: "", path: "", isDirectory: false)
     
     var body: some View {
         VStack(spacing: 0) {
             // Header with logo and actions
             HStack {
-                if let logoImage = NSImage(named: "TrAIn1ngC0d3 Logo") {
-                    Image(nsImage: logoImage)
-                        .resizable()
-                        .scaledToFit()
-                        .frame(height: 40)
-                        .padding(.trailing)
-                }
+                Image("AppLogo")
+                    .resizable()
+                    .scaledToFit()
+                    .frame(height: 40)
+                    .padding(.trailing, 8)
                 
                 Button(action: selectRootFolder) {
                     Label("Select Root", systemImage: "folder.badge.plus")
@@ -41,18 +33,13 @@ struct ContentView: View {
                         .lineLimit(1)
                         .truncationMode(.middle)
                         .foregroundColor(Theme.textColor)
+                        .padding(.horizontal, 8)
                 }
                 
                 Spacer()
-                
-                Button(action: { showImportDialog = true }) {
-                    Label("Import", systemImage: "square.and.arrow.down")
-                }
-                .buttonStyle(Theme.SecondaryButtonStyle())
             }
             .padding()
-            .frame(height: 60)
-            .background(Theme.backgroundColor)
+            .background(Theme.backgroundColor.opacity(0.8))
             
             Divider()
             
@@ -63,7 +50,6 @@ struct ContentView: View {
                         .font(.headline)
                         .foregroundColor(Theme.primaryColor)
                         .padding()
-                        .frame(height: 50)
                     
                     List(fileSystem.fileItems, children: \.children) { item in
                         FileItemRow(item: item, isSelected: fileSystem.selectedFiles.contains(item)) {
@@ -72,6 +58,7 @@ struct ContentView: View {
                         .contentShape(Rectangle())
                         .onTapGesture {
                             fileSystem.previewFileContent(for: item)
+                            selectedFile = item
                         }
                     }
                     .listStyle(.sidebar)
@@ -79,67 +66,102 @@ struct ContentView: View {
                 .frame(minWidth: 250)
                 .background(Theme.backgroundColor.opacity(0.5))
                 
-                // Center panel: Actions and Preview
-                VStack(spacing: 0) {
-                    // Actions
-                    HStack {
+                // Middle panel: File preview and analysis
+                VStack(spacing: 15) {
+                    if !fileSystem.lastClickedFileName.isEmpty {
                         Button("Generate Summary") {
                             isGeneratingSummary = true
                             Task {
-                                let summary = await fileSystem.generateSummary(for: fileSystem.lastClickedFileContent)
-                                currentSummaryFileName = fileSystem.lastClickedFileName
+                                let summary = await fileSystem.generateSummary(for: URL(fileURLWithPath: fileSystem.lastClickedFileName), content: fileSystem.lastClickedFileContent)
                                 currentSummaryContent = summary
+                                currentSummaryFileName = fileSystem.lastClickedFileName
                                 showSummarySheet = true
                                 isGeneratingSummary = false
                             }
                         }
                         .buttonStyle(Theme.BorderedButtonStyle())
-                        .disabled(fileSystem.lastClickedFileName.isEmpty || isGeneratingSummary)
+                        .disabled(isGeneratingSummary)
                         
-                        if isGeneratingSummary {
-                            ProgressView()
-                                .scaleEffect(0.5)
-                                .padding(.leading, 5)
-                        }
-                        
-                        Spacer()
-                    }
-                    .padding()
-                    
-                    // Preview area
-                    ScrollView {
-                        if !fileSystem.lastClickedFileName.isEmpty {
-                            GroupBox {
+                        GroupBox {
+                            VStack(alignment: .leading, spacing: 8) {
                                 Text("File Preview: \(fileSystem.lastClickedFileName)")
-                                    .foregroundColor(Theme.primaryColor)
                                     .font(.headline)
-                                Text(fileSystem.lastClickedFileContent)
-                                    .font(.system(.body, design: .monospaced))
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                    .textSelection(.enabled)
-                                    .foregroundColor(Theme.textColor)
+                                    .foregroundColor(Theme.primaryColor)
+                                
+                                ScrollView {
+                                    Text(fileSystem.lastClickedFileContent)
+                                        .font(.system(.body, design: .monospaced))
+                                        .textSelection(.enabled)
+                                }
+                                .frame(height: 200)
                             }
-                            .padding()
-                        } else {
-                            ContentUnavailableView {
-                                Label("No Preview", systemImage: "doc.text")
-                                    .foregroundColor(Theme.textColor.opacity(0.6))
-                            } description: {
-                                Text("Click a file to preview its contents")
-                                    .foregroundColor(Theme.textColor.opacity(0.6))
+                        }
+                        .groupBoxStyle(CustomGroupBoxStyle())
+                        
+                        HStack(spacing: 15) {
+                            // Imports section
+                            GroupBox {
+                                VStack(alignment: .leading, spacing: 8) {
+                                    Text("Imports From")
+                                        .font(.headline)
+                                        .foregroundColor(Theme.primaryColor)
+                                    
+                                    if let imports = fileSystem.fileImports[fileSystem.lastClickedFileName], !imports.isEmpty {
+                                        ScrollView {
+                                            VStack(alignment: .leading, spacing: 4) {
+                                                ForEach(Array(imports), id: \.self) { importedFile in
+                                                    Text(importedFile)
+                                                        .foregroundColor(Theme.textColor)
+                                                }
+                                            }
+                                        }
+                                    } else {
+                                        Text("No imports found")
+                                            .foregroundColor(Theme.textColor.opacity(0.6))
+                                    }
+                                }
                             }
-                            .frame(maxHeight: .infinity)
+                            .groupBoxStyle(CustomGroupBoxStyle())
+                            
+                            // Exports section
+                            GroupBox {
+                                VStack(alignment: .leading, spacing: 8) {
+                                    Text("Exports To")
+                                        .font(.headline)
+                                        .foregroundColor(Theme.primaryColor)
+                                    
+                                    if let exports = fileSystem.fileExports[fileSystem.lastClickedFileName], !exports.isEmpty {
+                                        ScrollView {
+                                            VStack(alignment: .leading, spacing: 4) {
+                                                ForEach(Array(exports), id: \.self) { exportedFile in
+                                                    Text(URL(fileURLWithPath: exportedFile).lastPathComponent)
+                                                        .foregroundColor(Theme.textColor)
+                                                }
+                                            }
+                                        }
+                                    } else {
+                                        Text("No exports found")
+                                            .foregroundColor(Theme.textColor.opacity(0.6))
+                                    }
+                                }
+                            }
+                            .groupBoxStyle(CustomGroupBoxStyle())
+                        }
+                        .frame(height: 150)
+                    } else {
+                        ContentUnavailableView {
+                            Label("No File Selected", systemImage: "doc")
+                        } description: {
+                            Text("Select a file to view its contents and analysis")
                         }
                     }
                 }
-                .frame(minWidth: 400)
-                .background(Theme.backgroundColor)
                 
                 // Right panel: Options and Summaries
                 VStack(spacing: 15) {
                     GroupBox {
                         VStack(alignment: .leading, spacing: 8) {
-                            Toggle("Show Hidden Files", isOn: $showHiddenFiles)
+                            Toggle("Show Hidden Files", isOn: $fileSystem.config.showHiddenFiles)
                                 .tint(Theme.primaryColor)
                             
                             Toggle(isOn: $includeImages) {
@@ -147,60 +169,45 @@ struct ContentView: View {
                                     .foregroundColor(Theme.textColor)
                             }
                             .tint(Theme.primaryColor)
+                            
+                            if !fileSystem.selectedFiles.isEmpty {
+                                Divider()
+                                Text("Selected Files")
+                                    .font(.headline)
+                                    .foregroundColor(Theme.textColor)
+                                
+                                ScrollView {
+                                    VStack(alignment: .leading, spacing: 8) {
+                                        ForEach(Array(fileSystem.selectedFiles)) { file in
+                                            if !file.isDirectory {
+                                                HStack {
+                                                    Text(file.name)
+                                                        .foregroundColor(Theme.textColor)
+                                                        .lineLimit(1)
+                                                    Spacer()
+                                                    Toggle("Comments", isOn: Binding(
+                                                        get: { file.includeComments },
+                                                        set: { newValue in
+                                                            if let index = fileSystem.fileItems.firstIndex(where: { $0.id == file.id }) {
+                                                                fileSystem.fileItems[index].includeComments = newValue
+                                                                // Refresh content if this is the currently viewed file
+                                                                if fileSystem.lastClickedFileName == file.path {
+                                                                    fileSystem.previewFileContent(for: fileSystem.fileItems[index])
+                                                                }
+                                                            }
+                                                        }
+                                                    ))
+                                                    .labelsHidden()
+                                                    .tint(Theme.primaryColor)
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                .frame(maxHeight: 150)
+                            }
                         }
                         .padding(.vertical, 5)
-                    }
-                    .groupBoxStyle(CustomGroupBoxStyle())
-                    
-                    // Recent imports
-                    GroupBox {
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text("Recent Imports")
-                                .font(.headline)
-                                .foregroundColor(Theme.primaryColor)
-                            
-                            if fileSystem.importedFiles.isEmpty {
-                                Text("No recent imports")
-                                    .foregroundColor(Theme.textColor.opacity(0.6))
-                            } else {
-                                ScrollView {
-                                    VStack(alignment: .leading, spacing: 4) {
-                                        ForEach(fileSystem.importedFiles, id: \.self) { url in
-                                            Text(url.lastPathComponent)
-                                                .lineLimit(1)
-                                                .foregroundColor(Theme.textColor)
-                                        }
-                                    }
-                                }
-                                .frame(height: 80)
-                            }
-                        }
-                    }
-                    .groupBoxStyle(CustomGroupBoxStyle())
-                    
-                    // Recent exports
-                    GroupBox {
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text("Recent Exports")
-                                .font(.headline)
-                                .foregroundColor(Theme.primaryColor)
-                            
-                            if fileSystem.exportedFiles.isEmpty {
-                                Text("No recent exports")
-                                    .foregroundColor(Theme.textColor.opacity(0.6))
-                            } else {
-                                ScrollView {
-                                    VStack(alignment: .leading, spacing: 4) {
-                                        ForEach(fileSystem.exportedFiles, id: \.self) { url in
-                                            Text(url.lastPathComponent)
-                                                .lineLimit(1)
-                                                .foregroundColor(Theme.textColor)
-                                        }
-                                    }
-                                }
-                                .frame(height: 80)
-                            }
-                        }
                     }
                     .groupBoxStyle(CustomGroupBoxStyle())
                     
@@ -242,8 +249,8 @@ struct ContentView: View {
                                 .font(.headline)
                                 .foregroundColor(Theme.primaryColor)
                             
-                            Picker("Format", selection: $outputFormat) {
-                                ForEach(ExportConfig.OutputFormat.allCases, id: \.self) { format in
+                            Picker("", selection: $outputFormat) {
+                                ForEach(OutputFormat.allCases, id: \.self) { format in
                                     Text(format.rawValue).tag(format)
                                 }
                             }
@@ -277,22 +284,13 @@ struct ContentView: View {
                 onRetry: {
                     isGeneratingSummary = true
                     Task {
-                        let summary = await fileSystem.generateSummary(for: fileSystem.lastClickedFileContent)
+                        let summary = await fileSystem.generateSummary(for: URL(fileURLWithPath: fileSystem.lastClickedFileName), content: fileSystem.lastClickedFileContent)
                         currentSummaryContent = summary
                         isGeneratingSummary = false
                     }
                 }
             )
             .frame(width: 800, height: 600)
-        }
-        .fileImporter(
-            isPresented: $showImportDialog,
-            allowedContentTypes: [.text],
-            allowsMultipleSelection: true
-        ) { result in
-            if case .success(let urls) = result {
-                fileSystem.importFiles(from: urls)
-            }
         }
     }
     
@@ -309,7 +307,7 @@ struct ContentView: View {
         }
     }
     
-    private func exportContent(as format: ExportConfig.OutputFormat) {
+    private func exportContent(as format: OutputFormat) {
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.text]
         panel.nameFieldStringValue = "export-\(ISO8601DateFormatter().string(from: Date()))"
@@ -317,7 +315,7 @@ struct ContentView: View {
         if panel.runModal() == .OK {
             if let url = panel.url {
                 let content = fileSystem.generateExport(format: format)
-                try? content.write(to: url, atomically: true, encoding: .utf8)
+                try? content.write(to: url, atomically: true, encoding: String.Encoding.utf8)
             }
         }
     }

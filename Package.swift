@@ -14,7 +14,8 @@ let package = Package(
             name: "TrAIn1ngC0d3",
             path: "Sources/TrAIn1ngC0d3",
             resources: [
-                .process("images")
+                .process("images"),
+                .process("Assets.xcassets")
             ]
         )
     ]
