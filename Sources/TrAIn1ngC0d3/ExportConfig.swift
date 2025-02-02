@@ -12,6 +12,14 @@ struct ExportConfig {
         case markdown = "Markdown"
         case html = "HTML"
         case plainText = "Plain Text"
+        
+        var fileExtension: String {
+            switch self {
+            case .markdown: return "md"
+            case .html: return "html"
+            case .plainText: return "txt"
+            }
+        }
     }
     
     init(

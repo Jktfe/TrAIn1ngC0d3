@@ -1,97 +1,62 @@
 import Foundation
-import NaturalLanguage
 
-class ExportGenerator: ObservableObject {
-    @Published var progress: Double = 0
-    private let config: ExportConfig
+@MainActor
+class ExportGenerator {
     private let model: FileSystemModel
+    private let outputFormat: ExportConfig.OutputFormat
     
-    init(config: ExportConfig, model: FileSystemModel) {
-        self.config = config
+    init(model: FileSystemModel, outputFormat: ExportConfig.OutputFormat) {
         self.model = model
+        self.outputFormat = outputFormat
     }
     
     func generateExport() -> URL? {
-        let selectedFiles = model.fileItems.filter { $0.isSelected && !$0.isDirectory }
-        let content = processFiles(selectedFiles)
+        let selectedFiles = model.selectedFiles.filter { !$0.isDirectory }
+        let content = processFiles(Array(selectedFiles))
         return createOutputFile(content: content)
     }
     
     private func processFiles(_ files: [FileItem]) -> String {
-        var output = ""
-        switch config.outputFormat {
-        case .markdown: output += "# Project Export\n\n"
-        case .html: output += "<!DOCTYPE html>\n<html>\n<body>\n<h1>Project Export</h1>\n"
-        default: break
-        }
+        var content = ""
         
+        // Add header
+        let timestamp = ISO8601DateFormatter().string(from: Date())
+        content += "# File Analysis - \(timestamp)\n\n"
+        
+        // Add file list
+        content += "## Files Analyzed\n\n"
         for file in files {
-            if config.includeImages && isImageFile(file.path) {
-                output += formatImageSection(file: file)
-                continue
-            }
-            
-            guard let content = try? String(contentsOfFile: file.path) else { continue }
-            let processedContent = config.stripComments ? 
-                CommentParser.removeComments(from: content, fileExtension: URL(fileURLWithPath: file.path).pathExtension) : 
-                content
-            
-            output += formatSection(title: file.name, content: processedContent)
+            content += "- \(file.name)\n"
+        }
+        content += "\n"
+        
+        // Add summaries
+        content += "## Summaries\n\n"
+        for summary in model.savedSummaries where summary.isIncluded {
+            content += "### \(summary.fileName)\n\n"
+            content += summary.content
+            content += "\n\n"
         }
         
-        if config.outputFormat == .html {
-            output += "</body>\n</html>"
-        }
-        return output
+        return content
     }
     
-    private func formatSection(title: String, content: String) -> String {
-        switch config.outputFormat {
-        case .markdown:
-            return "## \(title)\n```\(fileExtensionToLanguage(title))\n\(content)\n```\n\n"
-        case .html:
-            return "<h2>\(title)</h2>\n<pre><code>\(content)</code></pre>\n"
-        default:
-            return "=== \(title) ===\n\(content)\n\n"
-        }
-    }
-    
-    private func fileExtensionToLanguage(_ path: String) -> String {
-        let ext = URL(fileURLWithPath: path).pathExtension
-        switch ext {
-        case "swift": return "swift"
-        case "py": return "python"
-        case "js": return "javascript"
-        case "html": return "html"
-        case "css": return "css"
-        default: return ""
+    private func createOutputFile(content: String) -> URL? {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd-HHmmss"
+        let timestamp = formatter.string(from: Date())
+        
+        let fileManager = FileManager.default
+        let tempDir = fileManager.temporaryDirectory
+        let fileName = "export-\(timestamp).\(outputFormat.fileExtension)"
+        let fileURL = tempDir.appendingPathComponent(fileName)
+        
+        do {
+            try content.write(to: fileURL, atomically: true, encoding: .utf8)
+            return fileURL
+        } catch {
+            print("Error writing export file: \(error)")
+            return nil
         }
     }
-    
-    private func isImageFile(_ path: String) -> Bool {
-        let imageExtensions = ["png", "jpg", "jpeg", "gif"]
-        return imageExtensions.contains(URL(fileURLWithPath: path).pathExtension)
-    }
-    
-    private func formatImageSection(file: FileItem) -> String {
-        switch config.outputFormat {
-        case .markdown: return "![\(file.name)](\(file.path))\n\n"
-        case .html: return "<img src=\"\(file.path)\" alt=\"\(file.name)\">\n"
-        default: return "Image: \(file.path)\n"
-        }
-    }
-    
-// Change variable name from 'extension' to 'fileExtension'
-private func createOutputFile(content: String) -> URL? {
-    let tempDir = FileManager.default.temporaryDirectory
-    let fileExtension = config.outputFormat == .html ? "html" : "md"
-    let outputFile = tempDir.appendingPathComponent("Export-\(Date().timeIntervalSince1970).\(fileExtension)")
-    
-    do {
-        try content.write(to: outputFile, atomically: true, encoding: .utf8)
-        return outputFile
-    } catch {
-        return nil
-    }
-}
 }

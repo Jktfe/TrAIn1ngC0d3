@@ -15,11 +15,12 @@ struct SummaryEditView: View {
             HStack {
                 Text("Edit Summary")
                     .font(.headline)
+                    .foregroundColor(Theme.primaryColor)
                 Spacer()
                 Button("Close", action: onCancel)
+                    .buttonStyle(Theme.SecondaryButtonStyle())
             }
             .padding()
-            .background(Color(nsColor: .windowBackgroundColor))
             
             HSplitView {
                 // Main summary editor
@@ -29,14 +30,14 @@ struct SummaryEditView: View {
                         Button(action: { isSummaryFocused = true }) {
                             Label("Edit", systemImage: "pencil")
                         }
-                        .buttonStyle(.bordered)
+                        .buttonStyle(Theme.SecondaryButtonStyle())
                         
                         Spacer()
                         
                         Button(action: onSave) {
                             Label("Save", systemImage: "checkmark")
                         }
-                        .buttonStyle(.borderedProminent)
+                        .buttonStyle(Theme.BorderedButtonStyle())
                     }
                     .padding()
                     
@@ -45,6 +46,9 @@ struct SummaryEditView: View {
                         .font(.system(.body, design: .monospaced))
                         .focused($isSummaryFocused)
                         .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .background(Theme.backgroundColor.opacity(0.5))
+                        .cornerRadius(8)
                 }
                 .frame(minWidth: 500)
                 
@@ -68,13 +72,17 @@ struct SummaryEditView: View {
                             .padding(.vertical, 5)
                         }
                     }
+                    .foregroundColor(Theme.textColor.opacity(0.6))
                     
                     // Additional comments for retry
                     GroupBox("Additional Comments") {
                         VStack(alignment: .leading, spacing: 8) {
+                            Text("Additional comments to add before retry... (optional)")
+                                .foregroundColor(Theme.textColor.opacity(0.6))
                             TextEditor(text: $additionalComments)
-                                .font(.body)
                                 .frame(height: 100)
+                                .background(Theme.backgroundColor.opacity(0.5))
+                                .cornerRadius(8)
                             
                             Button(action: {
                                 onRetry()
@@ -83,15 +91,18 @@ struct SummaryEditView: View {
                                 Label("Retry with Comments", systemImage: "arrow.clockwise")
                                     .frame(maxWidth: .infinity)
                             }
-                            .buttonStyle(.bordered)
+                            .buttonStyle(Theme.SecondaryButtonStyle())
                             .disabled(additionalComments.isEmpty)
                         }
                     }
+                    .foregroundColor(Theme.textColor.opacity(0.6))
                 }
                 .frame(width: 250)
                 .padding()
             }
         }
+        .padding()
+        .background(Theme.backgroundColor)
     }
     
     private struct Section {

@@ -1,69 +1,56 @@
-import Foundation
+import SwiftUI
 import Combine
+import Foundation
+import NaturalLanguage
+import CreateML
 
 struct FileItem: Identifiable, Hashable {
-    let id: UUID
+    let id = UUID()
     let name: String
     let path: String
     let isDirectory: Bool
     let isExcluded: Bool
-    var isSelected: Bool
-    var children: [FileItem]?
+    let children: [FileItem]?
     
-    init(name: String, path: String, isDirectory: Bool, isExcluded: Bool, isSelected: Bool = false, children: [FileItem]? = nil) {
-        self.id = UUID()
+    init(name: String, path: String, isDirectory: Bool, isExcluded: Bool = false, children: [FileItem]? = nil) {
         self.name = name
         self.path = path
         self.isDirectory = isDirectory
         self.isExcluded = isExcluded
-        self.isSelected = isSelected
         self.children = children
-    }
-    
-    func hash(into hasher: inout Hasher) {
-        hasher.combine(path)
     }
     
     static func == (lhs: FileItem, rhs: FileItem) -> Bool {
         lhs.path == rhs.path
     }
     
-    func allSelectedFiles() -> [FileItem] {
-        var selectedFiles = [FileItem]()
-        if isSelected && !isDirectory {
-            selectedFiles.append(self)
-        }
-        if let children = children {
-            selectedFiles.append(contentsOf: children.flatMap { $0.allSelectedFiles() })
-        }
-        return selectedFiles
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(path)
     }
 }
 
+@MainActor
 class FileSystemModel: ObservableObject {
     @Published var fileItems: [FileItem] = []
     @Published var selectedFiles: Set<FileItem> = []
-    @Published var selectedFilePreview: String = ""
-    @Published var lastClickedFileContent: String = ""
-    @Published var lastClickedFileName: String = ""
-    @Published var rootPath: String?
     @Published var savedSummaries: [SavedSummary] = []
-    private let excludedDirectories: Set<String> = ["node_modules", ".venv", "venv", ".git"]
-    var config: ExportConfig
-    private var currentURL: URL?
+    @Published var lastClickedFileName: String = ""
+    @Published var lastClickedFileContent: String = ""
+    @Published var importedFiles: [URL] = []
+    @Published var exportedFiles: [URL] = []
+    @Published var config: ExportConfig
+    var rootPath: String?
     
     struct SavedSummary: Identifiable, Codable {
-        let id: UUID
+        var id: UUID
         let fileName: String
         let content: String
-        let timestamp: Date
         var isIncluded: Bool
         
         init(fileName: String, content: String) {
             self.id = UUID()
             self.fileName = fileName
             self.content = content
-            self.timestamp = Date()
             self.isIncluded = true
         }
     }
@@ -72,28 +59,20 @@ class FileSystemModel: ObservableObject {
         self.config = config
     }
     
-    var hasSelections: Bool {
-        func hasSelectedItems(_ items: [FileItem]) -> Bool {
-            for item in items {
-                if item.isSelected {
-                    return true
-                }
-                if let children = item.children, hasSelectedItems(children) {
-                    return true
-                }
-            }
-            return false
-        }
-        return hasSelectedItems(fileItems)
-    }
-    
     func loadDirectory(at url: URL) {
-        currentURL = url
+        rootPath = url.path
         refreshFileList()
     }
     
-    private func loadFileItems(at url: URL) -> [FileItem] {
-        guard let contents = try? FileManager.default.contentsOfDirectory(
+    func refreshFileList() {
+        guard let rootPath = rootPath else { return }
+        let rootURL = URL(fileURLWithPath: rootPath)
+        fileItems = loadFileItems(from: rootURL)
+    }
+    
+    private func loadFileItems(from url: URL) -> [FileItem] {
+        let fileManager = FileManager.default
+        guard let contents = try? fileManager.contentsOfDirectory(
             at: url,
             includingPropertiesForKeys: [URLResourceKey.isDirectoryKey],
             options: config.showHiddenFiles ? [] : .skipsHiddenFiles
@@ -106,114 +85,85 @@ class FileSystemModel: ObservableObject {
             let name = url.lastPathComponent
             let path = url.path
             
-            // Skip excluded directories
-            if isDirectory && excludedDirectories.contains(name) {
-                return nil
-            }
-            
-            let children = isDirectory ? loadFileItems(at: url) : nil
+            let children = isDirectory ? loadFileItems(from: url) : nil
             return FileItem(
                 name: name,
                 path: path,
                 isDirectory: isDirectory,
-                isExcluded: false,
+                isExcluded: !config.showHiddenFiles && name.hasPrefix("."),
                 children: children
             )
         }
-    }
-    
-    func refreshFileList() {
-        guard let url = currentURL else { return }
-        fileItems = loadFileItems(at: url)
-        
-        // Preserve selection state for existing items
-        let selectedPaths = selectedFiles.map { $0.path }
-        updateSelectionStates(items: &fileItems, selectedPaths: selectedPaths)
-    }
-    
-    private func updateSelectionStates(items: inout [FileItem], selectedPaths: [String]) {
-        for index in items.indices {
-            items[index].isSelected = selectedPaths.contains(items[index].path)
-            if var children = items[index].children {
-                updateSelectionStates(items: &children, selectedPaths: selectedPaths)
-                items[index].children = children
-            }
-        }
-    }
-    
-    func updatePreview() {
-        selectedFilePreview = selectedFiles.map { $0.name }.joined(separator: "\n")
+        .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
     }
     
     func toggleSelection(for item: FileItem) {
-        let isSelected = !item.isSelected
-        
-        // Update the selection state
-        if isSelected {
-            selectedFiles.insert(item)
-        } else {
+        if selectedFiles.contains(item) {
             selectedFiles.remove(item)
+        } else {
+            selectedFiles.insert(item)
         }
-        
-        // Update the file tree
-        var updatedItems = fileItems
-        _ = updateSelection(items: &updatedItems, path: item.path, isSelected: isSelected)
-        fileItems = updatedItems
-        
-        // Update preview
-        updatePreview()
-    }
-    
-    func updateSelection(items: inout [FileItem], path: String, isSelected: Bool) -> Bool {
-        var found = false
-        for index in items.indices {
-            if items[index].path == path {
-                items[index].isSelected = isSelected
-                if let children = items[index].children {
-                    var updatedChildren = children
-                    for childIndex in updatedChildren.indices where !updatedChildren[childIndex].isExcluded {
-                        updatedChildren[childIndex].isSelected = isSelected
-                        if updatedChildren[childIndex].children != nil {
-                            _ = updateSelection(items: &updatedChildren, path: updatedChildren[childIndex].path, isSelected: isSelected)
-                        }
-                    }
-                    items[index].children = updatedChildren
-                }
-                found = true
-                break
-            } else if let children = items[index].children {
-                var updatedChildren = children
-                if updateSelection(items: &updatedChildren, path: path, isSelected: isSelected) {
-                    items[index].children = updatedChildren
-                    found = true
-                    break
-                }
-            }
-        }
-        return found
     }
     
     func previewFileContent(for item: FileItem) {
-        guard !item.isDirectory else {
-            lastClickedFileContent = ""
-            lastClickedFileName = ""
-            return
+        guard !item.isDirectory else { return }
+        lastClickedFileName = item.name
+        lastClickedFileContent = (try? String(contentsOfFile: item.path)) ?? ""
+    }
+    
+    func generateSummary(for content: String) async -> String {
+        // Try Apple's NL processing first
+        if let appleSummary = generateAppleSummary(for: content) {
+            return appleSummary
         }
         
-        do {
-            let content = try String(contentsOfFile: item.path, encoding: .utf8)
-            lastClickedFileContent = content
-            lastClickedFileName = item.name
-        } catch {
-            lastClickedFileContent = "Error loading file: \(error.localizedDescription)"
-            lastClickedFileName = item.name
+        // Fallback to local DeepSeek if available
+        return await generateDeepSeekSummary(for: content)
+    }
+    
+    private func generateAppleSummary(for content: String) -> String? {
+        let tagger = NLTagger(tagSchemes: [.tokenType, .language, .lexicalClass])
+        tagger.string = content
+        
+        // Get key sentences
+        let options: NLTagger.Options = [.omitPunctuation, .omitWhitespace]
+        var sentences: [String] = []
+        tagger.enumerateTags(in: content.startIndex..<content.endIndex, unit: .sentence, scheme: .tokenType, options: options) { _, range in
+            let sentence = String(content[range])
+            sentences.append(sentence)
+            return true
         }
+        
+        // Select important sentences (first, last, and any containing key terms)
+        var summary = ""
+        if let first = sentences.first {
+            summary += first + "\n\n"
+        }
+        
+        let keyTerms = ["important", "key", "main", "significant", "essential", "critical"]
+        let middleSentences = sentences.dropFirst().dropLast()
+        for sentence in middleSentences {
+            if keyTerms.contains(where: { sentence.lowercased().contains($0) }) {
+                summary += sentence + "\n\n"
+            }
+        }
+        
+        if let last = sentences.last, last != sentences.first {
+            summary += last
+        }
+        
+        return summary.isEmpty ? nil : summary
+    }
+    
+    private func generateDeepSeekSummary(for content: String) async -> String {
+        // Here you would integrate with your local DeepSeek instance
+        // For now, return a placeholder
+        return "Summary generation with DeepSeek is not yet implemented.\n\nOriginal content:\n\n\(content)"
     }
     
     func saveSummary(_ content: String, for fileName: String) {
         let summary = SavedSummary(fileName: fileName, content: content)
         savedSummaries.append(summary)
-        // Could persist to disk here if needed
     }
     
     func toggleSummary(_ summary: SavedSummary) {
@@ -222,22 +172,19 @@ class FileSystemModel: ObservableObject {
         }
     }
     
-    func generateFileTree(for items: Set<FileItem>) -> String {
-        func buildTree(_ item: FileItem, depth: Int = 0) -> String {
-            let indent = String(repeating: "  ", count: depth)
-            var result = "\(indent)- \(item.name)\n"
-            
-            if let children = item.children?.filter({ !$0.isExcluded }) {
-                for child in children.sorted(by: { $0.name < $1.name }) {
-                    result += buildTree(child, depth: depth + 1)
-                }
+    func importFiles(from urls: [URL]) {
+        importedFiles.append(contentsOf: urls)
+        for url in urls {
+            if (try? String(contentsOf: url)) != nil {
+                let item = FileItem(
+                    name: url.lastPathComponent,
+                    path: url.path,
+                    isDirectory: false,
+                    isExcluded: false
+                )
+                selectedFiles.insert(item)
             }
-            return result
         }
-        
-        return items.sorted(by: { $0.name < $1.name })
-            .map { buildTree($0) }
-            .joined()
     }
     
     func generateExport(format: ExportConfig.OutputFormat) -> String {
@@ -321,48 +268,70 @@ class FileSystemModel: ObservableObject {
             output += "</body></html>"
         }
         
+        let tempDir = FileManager.default.temporaryDirectory
+        let fileName = "export-\(timestamp).\(format == .html ? "html" : "md")"
+        let fileURL = tempDir.appendingPathComponent(fileName)
+        
+        try? output.write(to: fileURL, atomically: true, encoding: .utf8)
+        exportedFiles.append(fileURL)
+        
         return output
+    }
+    
+    private func generateFileTree(for items: Set<FileItem>) -> String {
+        let sortedItems = items.sorted { $0.name < $1.name }
+        return sortedItems.map { item in
+            var output = "- \(item.name)\n"
+            if item.isDirectory, let children = item.children {
+                let childItems = Set(children)
+                output += childItems.map { "  \($0.name)" }.joined(separator: "\n")
+                output += "\n"
+            }
+            return output
+        }
+        .joined()
     }
     
     func getFolderSummary(for item: FileItem) -> String {
         var summary = ""
         
-        if item.isDirectory, let children = item.children {
-            let files = children.filter { !$0.isDirectory }
-            let folders = children.filter { $0.isDirectory }
-            
-            // Group files by extension
-            let groupedFiles = Dictionary(grouping: files) { file -> String in
-                let ext = (file.name as NSString).pathExtension.lowercased()
-                return ext.isEmpty ? "no extension" : ext
-            }
-            
-            summary += "# Folder Summary: \(item.name)\n\n"
-            
-            // Basic stats
-            summary += "## Overview\n"
-            summary += "- Total items: \(children.count)\n"
-            summary += "- Files: \(files.count)\n"
-            summary += "- Folders: \(folders.count)\n\n"
-            
-            // File types
-            summary += "## File Types\n"
-            for (ext, files) in groupedFiles.sorted(by: { $0.key < $1.key }) {
-                summary += "- .\(ext): \(files.count) files\n"
-                for file in files.sorted(by: { $0.name < $1.name }) {
-                    summary += "  - \(file.name)\n"
+        // Basic information
+        summary += "# Folder Summary: \(item.name)\n\n"
+        
+        // Count files and subdirectories
+        var fileCount = 0
+        var dirCount = 0
+        var totalSize: Int64 = 0
+        
+        func processItem(_ item: FileItem) {
+            if item.isDirectory {
+                dirCount += 1
+                if let children = item.children {
+                    children.forEach(processItem)
                 }
-            }
-            summary += "\n"
-            
-            // Subfolders
-            if !folders.isEmpty {
-                summary += "## Subfolders\n"
-                for folder in folders.sorted(by: { $0.name < $1.name }) {
-                    summary += "- \(folder.name)\n"
+            } else {
+                fileCount += 1
+                if let attributes = try? FileManager.default.attributesOfItem(atPath: item.path) {
+                    totalSize += attributes[.size] as? Int64 ?? 0
                 }
             }
         }
+        
+        processItem(item)
+        
+        // Format size
+        let formatter = ByteCountFormatter()
+        formatter.allowedUnits = [.useBytes, .useKB, .useMB, .useGB]
+        formatter.countStyle = .file
+        let sizeString = formatter.string(fromByteCount: totalSize)
+        
+        summary += """
+            ## Statistics
+            - Total Files: \(fileCount)
+            - Total Subdirectories: \(dirCount)
+            - Total Size: \(sizeString)
+            
+            """
         
         return summary
     }

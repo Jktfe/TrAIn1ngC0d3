@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import Foundation
 
 struct ContentView: View {
     @StateObject private var fileSystem = FileSystemModel()
@@ -10,240 +11,296 @@ struct ContentView: View {
         }
     }
     @State private var includeImages = true
-    @State private var outputFormat: ExportConfig.OutputFormat = ExportConfig.OutputFormat.markdown
-    @State private var generatedSummary: SummaryGenerator.Summary?
+    @State private var outputFormat: ExportConfig.OutputFormat = .markdown
+    @State private var showSummarySheet = false
+    @State private var currentSummaryFileName = ""
+    @State private var currentSummaryContent = ""
     @State private var isEditingSummary = false
-    @State private var editedSummary: String = ""
-    @State private var additionalComments: String = ""
-    @State private var showAlert = false
-    @State private var alertMessage = ""
-    
-    enum OutputFormat: String, CaseIterable {
-        case markdown = "Markdown"
-        case html = "HTML"
-        case plainText = "Plain Text"
-    }
+    @State private var showImportDialog = false
+    @State private var isGeneratingSummary = false
     
     var body: some View {
         VStack(spacing: 0) {
-            // Root folder selection
+            // Header with logo and actions
             HStack {
+                if let logoImage = NSImage(named: "TrAIn1ngC0d3 Logo") {
+                    Image(nsImage: logoImage)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(height: 40)
+                        .padding(.trailing)
+                }
+                
                 Button(action: selectRootFolder) {
                     Label("Select Root", systemImage: "folder.badge.plus")
                 }
+                .buttonStyle(Theme.BorderedButtonStyle())
+                
                 if let path = fileSystem.rootPath {
                     Text(path)
                         .lineLimit(1)
                         .truncationMode(.middle)
+                        .foregroundColor(Theme.textColor)
                 }
+                
+                Spacer()
+                
+                Button(action: { showImportDialog = true }) {
+                    Label("Import", systemImage: "square.and.arrow.down")
+                }
+                .buttonStyle(Theme.SecondaryButtonStyle())
             }
             .padding()
-            .frame(height: 50)
-            .background(Color(nsColor: .windowBackgroundColor))
+            .frame(height: 60)
+            .background(Theme.backgroundColor)
             
             Divider()
             
             HSplitView {
                 // Left panel: File browser
                 VStack(alignment: .leading, spacing: 0) {
-                    Text("Files and Folders:")
+                    Text("Files and Folders")
                         .font(.headline)
+                        .foregroundColor(Theme.primaryColor)
                         .padding()
                         .frame(height: 50)
                     
-                    FileTreeView(fileSystem: fileSystem, showHiddenFiles: showHiddenFiles)
-                        .frame(minWidth: 250)
+                    List(fileSystem.fileItems, children: \.children) { item in
+                        FileItemRow(item: item, isSelected: fileSystem.selectedFiles.contains(item)) {
+                            fileSystem.toggleSelection(for: item)
+                        }
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            fileSystem.previewFileContent(for: item)
+                        }
+                    }
+                    .listStyle(.sidebar)
                 }
-                .background(Color(nsColor: .controlBackgroundColor))
+                .frame(minWidth: 250)
+                .background(Theme.backgroundColor.opacity(0.5))
                 
                 // Center panel: Actions and Preview
                 VStack(spacing: 0) {
-                    // Action buttons
-                    VStack(spacing: 8) {
-                        Button(action: generateSummary) {
-                            Text("Generate Summary")
-                                .frame(maxWidth: .infinity)
+                    // Actions
+                    HStack {
+                        Button("Generate Summary") {
+                            isGeneratingSummary = true
+                            Task {
+                                let summary = await fileSystem.generateSummary(for: fileSystem.lastClickedFileContent)
+                                currentSummaryFileName = fileSystem.lastClickedFileName
+                                currentSummaryContent = summary
+                                showSummarySheet = true
+                                isGeneratingSummary = false
+                            }
                         }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(fileSystem.selectedFiles.isEmpty)
+                        .buttonStyle(Theme.BorderedButtonStyle())
+                        .disabled(fileSystem.lastClickedFileName.isEmpty || isGeneratingSummary)
                         
-                        if fileSystem.selectedFiles.isEmpty {
-                            Text("Select one or more files to generate a summary")
-                                .foregroundColor(.secondary)
-                                .font(.caption)
+                        if isGeneratingSummary {
+                            ProgressView()
+                                .scaleEffect(0.5)
+                                .padding(.leading, 5)
                         }
+                        
+                        Spacer()
                     }
                     .padding()
-                    .frame(height: 80)
                     
-                    Divider()
-                    
-                    // Preview area with consistent height
+                    // Preview area
                     ScrollView {
-                        if let preview = fileSystem.lastClickedFileName.isEmpty ? nil : fileSystem.lastClickedFileContent {
-                            GroupBox(label: Text("File Preview: \(fileSystem.lastClickedFileName)")) {
-                                Text(preview)
+                        if !fileSystem.lastClickedFileName.isEmpty {
+                            GroupBox {
+                                Text("File Preview: \(fileSystem.lastClickedFileName)")
+                                    .foregroundColor(Theme.primaryColor)
+                                    .font(.headline)
+                                Text(fileSystem.lastClickedFileContent)
                                     .font(.system(.body, design: .monospaced))
                                     .frame(maxWidth: .infinity, alignment: .leading)
                                     .textSelection(.enabled)
+                                    .foregroundColor(Theme.textColor)
                             }
                             .padding()
                         } else {
                             ContentUnavailableView {
                                 Label("No Preview", systemImage: "doc.text")
+                                    .foregroundColor(Theme.textColor.opacity(0.6))
                             } description: {
                                 Text("Click a file to preview its contents")
+                                    .foregroundColor(Theme.textColor.opacity(0.6))
                             }
-                            .frame(maxHeight: CGFloat.infinity)
+                            .frame(maxHeight: .infinity)
                         }
                     }
                 }
                 .frame(minWidth: 400)
-                .background(Color(nsColor: .windowBackgroundColor))
+                .background(Theme.backgroundColor)
                 
                 // Right panel: Options and Summaries
                 VStack(spacing: 15) {
-                    // Content Options
-                    GroupBox(label: Text("Content Options")) {
+                    GroupBox {
                         VStack(alignment: .leading, spacing: 8) {
-                            Toggle(isOn: $showHiddenFiles) {
-                                HStack {
-                                    Text("Show Hidden Files")
-                                    Image(systemName: "eye")
-                                        .foregroundColor(showHiddenFiles ? .accentColor : .secondary)
-                                }
-                            }
-                            .onChange(of: showHiddenFiles) { oldValue, newValue in
-                                fileSystem.config.showHiddenFiles = newValue
-                                fileSystem.refreshFileList()
-                            }
+                            Toggle("Show Hidden Files", isOn: $showHiddenFiles)
+                                .tint(Theme.primaryColor)
                             
                             Toggle(isOn: $includeImages) {
-                                HStack {
-                                    Text("Include Images")
-                                    Image(systemName: "photo")
-                                        .foregroundColor(includeImages ? .accentColor : .secondary)
-                                }
+                                Label("Include Images", systemImage: "photo")
+                                    .foregroundColor(Theme.textColor)
                             }
+                            .tint(Theme.primaryColor)
                         }
                         .padding(.vertical, 5)
                     }
+                    .groupBoxStyle(CustomGroupBoxStyle())
                     
-                    // Imports/Exports sections with consistent height
-                    GroupBox(label: Text("Imports from:")) {
-                        ImportExportList(items: fileSystem.fileItems)
-                            .frame(height: 120)
-                    }
-                    
-                    GroupBox(label: Text("Exports to:")) {
-                        ImportExportList(items: fileSystem.fileItems)
-                            .frame(height: 120)
-                    }
-                    
-                    // Summaries with consistent height
-                    GroupBox(label: Text("Summaries:")) {
-                        if fileSystem.savedSummaries.isEmpty {
-                            ContentUnavailableView {
-                                Label("No Summaries", systemImage: "doc.text.magnifyingglass")
-                            } description: {
-                                Text("Generate a summary to see it here")
-                            }
-                            .frame(height: 100)
-                        } else {
-                            ScrollView {
-                                VStack(alignment: .leading, spacing: 8) {
-                                    ForEach(fileSystem.savedSummaries) { summary in
-                                        HStack {
-                                            Image(systemName: summary.isIncluded ? "checkmark.square.fill" : "square")
-                                                .foregroundColor(summary.isIncluded ? .accentColor : .secondary)
-                                                .onTapGesture {
-                                                    fileSystem.toggleSummary(summary)
-                                                }
-                                            Text(summary.fileName)
+                    // Recent imports
+                    GroupBox {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Recent Imports")
+                                .font(.headline)
+                                .foregroundColor(Theme.primaryColor)
+                            
+                            if fileSystem.importedFiles.isEmpty {
+                                Text("No recent imports")
+                                    .foregroundColor(Theme.textColor.opacity(0.6))
+                            } else {
+                                ScrollView {
+                                    VStack(alignment: .leading, spacing: 4) {
+                                        ForEach(fileSystem.importedFiles, id: \.self) { url in
+                                            Text(url.lastPathComponent)
                                                 .lineLimit(1)
+                                                .foregroundColor(Theme.textColor)
                                         }
                                     }
                                 }
+                                .frame(height: 80)
                             }
-                            .frame(height: 100)
                         }
                     }
+                    .groupBoxStyle(CustomGroupBoxStyle())
                     
-                    Spacer()
-                    
-                    // Output format
-                    GroupBox(label: Text("Output Format")) {
-                        Picker("Format", selection: $outputFormat) {
-                            ForEach(ExportConfig.OutputFormat.allCases, id: \.self) { format in
-                                Text(format.rawValue).tag(format)
+                    // Recent exports
+                    GroupBox {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Recent Exports")
+                                .font(.headline)
+                                .foregroundColor(Theme.primaryColor)
+                            
+                            if fileSystem.exportedFiles.isEmpty {
+                                Text("No recent exports")
+                                    .foregroundColor(Theme.textColor.opacity(0.6))
+                            } else {
+                                ScrollView {
+                                    VStack(alignment: .leading, spacing: 4) {
+                                        ForEach(fileSystem.exportedFiles, id: \.self) { url in
+                                            Text(url.lastPathComponent)
+                                                .lineLimit(1)
+                                                .foregroundColor(Theme.textColor)
+                                        }
+                                    }
+                                }
+                                .frame(height: 80)
                             }
                         }
-                        .pickerStyle(.segmented)
+                    }
+                    .groupBoxStyle(CustomGroupBoxStyle())
+                    
+                    GroupBox {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Summaries")
+                                .font(.headline)
+                                .foregroundColor(Theme.primaryColor)
+                            
+                            if fileSystem.savedSummaries.isEmpty {
+                                Text("No summaries generated")
+                                    .foregroundColor(Theme.textColor.opacity(0.6))
+                            } else {
+                                ScrollView {
+                                    VStack(alignment: .leading, spacing: 8) {
+                                        ForEach(fileSystem.savedSummaries) { summary in
+                                            HStack {
+                                                Image(systemName: summary.isIncluded ? "checkmark.square.fill" : "square")
+                                                    .foregroundColor(summary.isIncluded ? Theme.primaryColor : Theme.textColor.opacity(0.3))
+                                                    .onTapGesture {
+                                                        fileSystem.toggleSummary(summary)
+                                                    }
+                                                Text(summary.fileName)
+                                                    .lineLimit(1)
+                                                    .foregroundColor(Theme.textColor)
+                                            }
+                                        }
+                                    }
+                                }
+                                .frame(height: 100)
+                            }
+                        }
+                    }
+                    .groupBoxStyle(CustomGroupBoxStyle())
+                    
+                    GroupBox {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Export Format")
+                                .font(.headline)
+                                .foregroundColor(Theme.primaryColor)
+                            
+                            Picker("Format", selection: $outputFormat) {
+                                ForEach(ExportConfig.OutputFormat.allCases, id: \.self) { format in
+                                    Text(format.rawValue).tag(format)
+                                }
+                            }
+                            .pickerStyle(.segmented)
+                        }
                         .padding(.vertical, 5)
                     }
+                    .groupBoxStyle(CustomGroupBoxStyle())
                     
                     Button("Generate Export") {
-                        let panel = NSSavePanel()
-                        panel.allowedContentTypes = [.text]
-                        panel.nameFieldStringValue = "export-\(ISO8601DateFormatter().string(from: Date()))"
-                        
-                        switch outputFormat {
-                        case .markdown:
-                            panel.allowedContentTypes = [.text]
-                            panel.nameFieldStringValue += ".md"
-                        case .html:
-                            panel.allowedContentTypes = [.html]
-                            panel.nameFieldStringValue += ".html"
-                        case .plainText:
-                            panel.allowedContentTypes = [.text]
-                            panel.nameFieldStringValue += ".txt"
-                        }
-                        
-                        if panel.runModal() == .OK {
-                            if let url = panel.url {
-                                let content = fileSystem.generateExport(format: outputFormat)
-                                try? content.write(to: url, atomically: true, encoding: .utf8)
-                            }
-                        }
+                        exportContent(as: outputFormat)
                     }
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(Theme.BorderedButtonStyle())
                     .disabled(fileSystem.selectedFiles.isEmpty && fileSystem.savedSummaries.isEmpty)
                 }
                 .frame(width: 250)
                 .padding()
-                .background(Color(nsColor: .controlBackgroundColor))
+                .background(Theme.backgroundColor.opacity(0.5))
             }
         }
-        .sheet(isPresented: $isEditingSummary) {
+        .sheet(isPresented: $showSummarySheet) {
             SummaryEditView(
-                summary: $editedSummary,
+                summary: $currentSummaryContent,
                 onSave: {
-                    if let summary = generatedSummary {
-                        fileSystem.saveSummary(editedSummary, for: summary.fileName)
-                    }
-                    isEditingSummary = false
+                    fileSystem.saveSummary(currentSummaryContent, for: currentSummaryFileName)
+                    showSummarySheet = false
                 },
                 onCancel: {
-                    isEditingSummary = false
+                    showSummarySheet = false
                 },
                 onRetry: {
-                    generateSummary()
+                    isGeneratingSummary = true
+                    Task {
+                        let summary = await fileSystem.generateSummary(for: fileSystem.lastClickedFileContent)
+                        currentSummaryContent = summary
+                        isGeneratingSummary = false
+                    }
                 }
             )
-            .frame(minWidth: 800, minHeight: 600)
+            .frame(width: 800, height: 600)
         }
-        .alert("No Files Selected", isPresented: $showAlert) {
-            Button("OK", role: .cancel) { }
-        } message: {
-            Text(alertMessage)
+        .fileImporter(
+            isPresented: $showImportDialog,
+            allowedContentTypes: [.text],
+            allowsMultipleSelection: true
+        ) { result in
+            if case .success(let urls) = result {
+                fileSystem.importFiles(from: urls)
+            }
         }
     }
     
     private func selectRootFolder() {
         let panel = NSOpenPanel()
-        panel.allowsMultipleSelection = false
-        panel.canChooseDirectories = true
         panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
         
         if panel.runModal() == .OK {
             if let url = panel.url {
@@ -252,49 +309,16 @@ struct ContentView: View {
         }
     }
     
-    private func generateSummary() {
-        guard !fileSystem.selectedFiles.isEmpty else {
-            alertMessage = "Please select one or more files to generate a summary."
-            showAlert = true
-            return
-        }
+    private func exportContent(as format: ExportConfig.OutputFormat) {
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.text]
+        panel.nameFieldStringValue = "export-\(ISO8601DateFormatter().string(from: Date()))"
         
-        do {
-            let selectedItems = Array(fileSystem.selectedFiles)
-            var summary: SummaryGenerator.Summary
-            
-            if selectedItems.count == 1, let item = selectedItems.first, item.isDirectory {
-                // Generate folder summary
-                let content = fileSystem.getFolderSummary(for: item)
-                summary = SummaryGenerator.Summary(
-                    content: content,
-                    analysis: "Folder analysis for \(item.name)",
-                    fileName: item.name
-                )
-            } else {
-                // Generate regular summary
-                summary = try SummaryGenerator.generateSummary(
-                    for: selectedItems.map { item in 
-                        FileItem(
-                            name: item.name, 
-                            path: item.path, 
-                            isDirectory: item.isDirectory,
-                            isExcluded: item.isExcluded,
-                            isSelected: item.isSelected,
-                            children: item.children
-                        )
-                    },
-                    additionalComments: additionalComments
-                )
+        if panel.runModal() == .OK {
+            if let url = panel.url {
+                let content = fileSystem.generateExport(format: format)
+                try? content.write(to: url, atomically: true, encoding: .utf8)
             }
-            
-            self.generatedSummary = summary
-            self.editedSummary = summary.content
-            self.isEditingSummary = true
-            self.additionalComments = "" // Reset additional comments
-        } catch {
-            alertMessage = "Error generating summary: \(error.localizedDescription)"
-            showAlert = true
         }
     }
 }
@@ -315,51 +339,45 @@ struct ContentUnavailableView<Label: View>: View {
     }
 }
 
-struct FileTreeView: View {
-    @ObservedObject var fileSystem: FileSystemModel
-    var showHiddenFiles: Bool
-    
-    init(fileSystem: FileSystemModel, showHiddenFiles: Bool) {
-        self.fileSystem = fileSystem
-        self.showHiddenFiles = showHiddenFiles
-    }
-    
-    var body: some View {
-        List(fileSystem.fileItems.filter { showHiddenFiles || !$0.name.hasPrefix(".") }, children: \.children) { item in
-            FileItemRow(item: item, toggleSelection: {
-                fileSystem.toggleSelection(for: item)
-                fileSystem.updatePreview()
-            }, model: fileSystem)
-            .id(item.id)
-        }
-        .listStyle(.sidebar)
-    }
-}
-
 struct FileItemRow: View {
     let item: FileItem
+    let isSelected: Bool
     let toggleSelection: () -> Void
-    @ObservedObject var model: FileSystemModel
     
     var body: some View {
         HStack {
             Image(systemName: item.isDirectory ? "folder.fill" : "doc.text.fill")
-                .foregroundColor(item.isExcluded ? .gray : (item.isDirectory ? .blue : .secondary))
-            
+                .foregroundColor(Theme.primaryColor.opacity(0.8))
             Text(item.name)
-                .foregroundColor(item.isExcluded ? .gray : .primary)
+                .foregroundColor(Theme.textColor)
             
             if !item.isExcluded {
                 Spacer()
                 Toggle("", isOn: Binding(
-                    get: { item.isSelected },
+                    get: { isSelected },
                     set: { _ in toggleSelection() }
                 ))
             }
         }
         .contentShape(Rectangle())
-        .onTapGesture {
-            model.previewFileContent(for: item)
+    }
+}
+
+struct CustomGroupBoxStyle: GroupBoxStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        VStack(alignment: .leading) {
+            configuration.label
+                .font(.headline)
+                .foregroundColor(Theme.primaryColor)
+            
+            configuration.content
+                .padding(.top, 5)
         }
+        .padding()
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(Color.white)
+                .shadow(color: Color.black.opacity(0.1), radius: 2, x: 0, y: 1)
+        )
     }
 }
