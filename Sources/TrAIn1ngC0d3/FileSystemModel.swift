@@ -271,7 +271,7 @@ class FileSystemModel: ObservableObject {
         }
     }
     
-    private func analyzeFileImportsAndExports(_ content: String, filePath: String) {
+    public func analyzeFileImportsAndExports(_ content: String, filePath: String) {
         // Clear existing entries for this file
         fileImports[filePath] = Set<String>()
         fileExports[filePath] = Set<String>()
