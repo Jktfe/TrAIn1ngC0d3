@@ -51,13 +51,30 @@ struct ContentView: View {
                         .foregroundColor(Theme.primaryColor)
                         .padding()
                     
-                    List(fileSystem.fileItems, children: \.children) { item in
+                    List(fileSystem.fileItems) { item in
                         FileItemRow(item: item, isSelected: fileSystem.selectedFiles.contains(item)) {
                             fileSystem.toggleSelection(for: item)
                         }
                         .contentShape(Rectangle())
                         .onTapGesture {
-                            fileSystem.previewFileContent(for: item)
+                            Task {
+                                fileSystem.lastClickedFileName = item.name
+                                fileSystem.lastClickedFilePath = item.path
+                                if let content = try? String(contentsOfFile: item.path, encoding: .utf8) {
+                                    fileSystem.lastClickedFileContent = content
+                                    
+                                    // Try to load saved summary first
+                                    if let savedSummary = fileSystem.getSavedSummary(for: item.name) {
+                                        currentSummaryContent = savedSummary
+                                    } else {
+                                        // Generate new summary if none exists
+                                        currentSummaryContent = await fileSystem.generateSummary(for: URL(fileURLWithPath: item.path), content: content)
+                                        fileSystem.saveSummary(currentSummaryContent, for: item.name)
+                                    }
+                                    
+                                    fileSystem.analyzeFileImportsAndExports(content, filePath: item.path)
+                                }
+                            }
                             selectedFile = item
                         }
                     }
@@ -68,13 +85,13 @@ struct ContentView: View {
                 
                 // Middle panel: File preview and analysis
                 VStack(spacing: 15) {
-                    if !fileSystem.lastClickedFileName.isEmpty {
+                    if let filePath = fileSystem.lastClickedFileName {
                         Button("Generate Summary") {
                             isGeneratingSummary = true
                             Task {
-                                let summary = await fileSystem.generateSummary(for: URL(fileURLWithPath: fileSystem.lastClickedFileName), content: fileSystem.lastClickedFileContent)
+                                let summary = await fileSystem.generateSummary(for: URL(fileURLWithPath: filePath), content: fileSystem.lastClickedFileContent)
                                 currentSummaryContent = summary
-                                currentSummaryFileName = fileSystem.lastClickedFileName
+                                currentSummaryFileName = filePath
                                 showSummarySheet = true
                                 isGeneratingSummary = false
                             }
@@ -84,68 +101,31 @@ struct ContentView: View {
                         
                         GroupBox {
                             VStack(alignment: .leading, spacing: 8) {
-                                Text("File Preview: \(fileSystem.lastClickedFileName)")
-                                    .font(.headline)
-                                    .foregroundColor(Theme.primaryColor)
+                                HStack {
+                                    Text("File Preview: \(filePath)")
+                                        .font(.headline)
+                                        .foregroundColor(Theme.primaryColor)
+                                    
+                                    Spacer()
+                                    
+                                    Toggle("Show Comments", isOn: $fileSystem.showComments)
+                                        .toggleStyle(SwitchToggleStyle(tint: Theme.primaryColor))
+                                }
                                 
                                 ScrollView {
-                                    Text(fileSystem.lastClickedFileContent)
+                                    Text(fileSystem.showComments ? fileSystem.lastClickedFileContent : fileSystem.stripComments(from: fileSystem.lastClickedFileContent))
                                         .font(.system(.body, design: .monospaced))
-                                        .textSelection(.enabled)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
                                 }
                                 .frame(height: 200)
                             }
+                            .padding()
                         }
                         .groupBoxStyle(CustomGroupBoxStyle())
                         
                         HStack(spacing: 15) {
-                            // Imports section
-                            GroupBox {
-                                VStack(alignment: .leading, spacing: 8) {
-                                    Text("Imports From")
-                                        .font(.headline)
-                                        .foregroundColor(Theme.primaryColor)
-                                    
-                                    if let imports = fileSystem.fileImports[fileSystem.lastClickedFileName], !imports.isEmpty {
-                                        ScrollView {
-                                            VStack(alignment: .leading, spacing: 4) {
-                                                ForEach(Array(imports), id: \.self) { importedFile in
-                                                    Text(importedFile)
-                                                        .foregroundColor(Theme.textColor)
-                                                }
-                                            }
-                                        }
-                                    } else {
-                                        Text("No imports found")
-                                            .foregroundColor(Theme.textColor.opacity(0.6))
-                                    }
-                                }
-                            }
-                            .groupBoxStyle(CustomGroupBoxStyle())
-                            
-                            // Exports section
-                            GroupBox {
-                                VStack(alignment: .leading, spacing: 8) {
-                                    Text("Exports To")
-                                        .font(.headline)
-                                        .foregroundColor(Theme.primaryColor)
-                                    
-                                    if let exports = fileSystem.fileExports[fileSystem.lastClickedFileName], !exports.isEmpty {
-                                        ScrollView {
-                                            VStack(alignment: .leading, spacing: 4) {
-                                                ForEach(Array(exports), id: \.self) { exportedFile in
-                                                    Text(URL(fileURLWithPath: exportedFile).lastPathComponent)
-                                                        .foregroundColor(Theme.textColor)
-                                                }
-                                            }
-                                        }
-                                    } else {
-                                        Text("No exports found")
-                                            .foregroundColor(Theme.textColor.opacity(0.6))
-                                    }
-                                }
-                            }
-                            .groupBoxStyle(CustomGroupBoxStyle())
+                            importsFromSection
+                            exportsToSection
                         }
                         .frame(height: 150)
                     } else {
@@ -272,26 +252,55 @@ struct ContentView: View {
             }
         }
         .sheet(isPresented: $showSummarySheet) {
-            SummaryEditView(
-                summary: $currentSummaryContent,
-                onSave: {
-                    fileSystem.saveSummary(currentSummaryContent, for: currentSummaryFileName)
-                    showSummarySheet = false
-                },
-                onCancel: {
-                    showSummarySheet = false
-                },
-                onRetry: {
-                    isGeneratingSummary = true
-                    Task {
-                        let summary = await fileSystem.generateSummary(for: URL(fileURLWithPath: fileSystem.lastClickedFileName), content: fileSystem.lastClickedFileContent)
-                        currentSummaryContent = summary
-                        isGeneratingSummary = false
-                    }
-                }
-            )
-            .frame(width: 800, height: 600)
+            EditSummaryView(fileSystem: fileSystem, isPresented: $showSummarySheet, summaryContent: $currentSummaryContent)
+                .frame(width: 800, height: 600)
         }
+    }
+    
+    var importsFromSection: some View {
+        GroupBox(label: Text("Imports From").bold()) {
+            if let filePath = fileSystem.lastClickedFileName,
+               let imports = fileSystem.fileImports[filePath],
+               !imports.isEmpty {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 4) {
+                        ForEach(Array(imports).sorted(), id: \.self) { importName in
+                            Text(importName)
+                                .foregroundColor(Theme.textColor)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            } else {
+                Text("No imports found")
+                    .foregroundColor(Theme.textColor)
+                    .italic()
+            }
+        }
+        .groupBoxStyle(TransparentGroupBox())
+    }
+    
+    var exportsToSection: some View {
+        GroupBox(label: Text("Exports To").bold()) {
+            if let filePath = fileSystem.lastClickedFileName,
+               let exports = fileSystem.fileExports[filePath],
+               !exports.isEmpty {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 4) {
+                        ForEach(Array(exports).sorted(), id: \.self) { exportName in
+                            Text(exportName)
+                                .foregroundColor(Theme.textColor)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            } else {
+                Text("No exports found")
+                    .foregroundColor(Theme.textColor)
+                    .italic()
+            }
+        }
+        .groupBoxStyle(TransparentGroupBox())
     }
     
     private func selectRootFolder() {
@@ -317,6 +326,96 @@ struct ContentView: View {
                 let content = fileSystem.generateExport(format: format)
                 try? content.write(to: url, atomically: true, encoding: String.Encoding.utf8)
             }
+        }
+    }
+}
+
+struct EditSummaryView: View {
+    @ObservedObject var fileSystem: FileSystemModel
+    @Binding var isPresented: Bool
+    @Binding var summaryContent: String
+    @State private var editedContent: String = ""
+    @State private var additionalComments: String = ""
+    @State private var isEditing: Bool = false
+    
+    var body: some View {
+        VStack(spacing: 20) {
+            HStack {
+                Text("Edit Summary")
+                    .font(.title2)
+                    .bold()
+                Spacer()
+                Button("Close") {
+                    isPresented = false
+                }
+            }
+            .padding(.bottom)
+            
+            if isEditing {
+                TextEditor(text: $editedContent)
+                    .font(.system(.body, design: .monospaced))
+                    .frame(minHeight: 300)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8)
+                            .stroke(Theme.borderColor, lineWidth: 1)
+                    )
+            } else {
+                ScrollView {
+                    Text(summaryContent)
+                        .font(.system(.body, design: .monospaced))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding()
+                        .background(Theme.backgroundColor)
+                        .cornerRadius(8)
+                }
+                .frame(minHeight: 300)
+            }
+            
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Additional Comments")
+                    .font(.headline)
+                TextEditor(text: $additionalComments)
+                    .font(.system(.body))
+                    .frame(height: 100)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8)
+                            .stroke(Theme.borderColor, lineWidth: 1)
+                    )
+            }
+            
+            HStack {
+                Button(isEditing ? "Save" : "Edit") {
+                    if isEditing {
+                        fileSystem.saveSummary(editedContent, for: fileSystem.lastClickedFileName ?? "")
+                        summaryContent = editedContent
+                        isEditing = false
+                    } else {
+                        editedContent = summaryContent
+                        isEditing = true
+                    }
+                }
+                .buttonStyle(PrimaryButtonStyle())
+                
+                if !isEditing {
+                    Button("Retry with Comments") {
+                        Task {
+                            if let fileName = fileSystem.lastClickedFileName,
+                               let filePath = fileSystem.lastClickedFilePath,
+                               let content = try? String(contentsOfFile: filePath, encoding: .utf8) {
+                                let newSummary = await fileSystem.generateSummary(for: URL(fileURLWithPath: filePath), content: content)
+                                fileSystem.saveSummary(newSummary, for: fileName)
+                                summaryContent = newSummary
+                            }
+                        }
+                    }
+                    .buttonStyle(SecondaryButtonStyle())
+                }
+            }
+        }
+        .padding()
+        .frame(minWidth: 600, minHeight: 500)
+        .onAppear {
+            editedContent = summaryContent
         }
     }
 }
@@ -377,5 +476,52 @@ struct CustomGroupBoxStyle: GroupBoxStyle {
                 .fill(Color.white)
                 .shadow(color: Color.black.opacity(0.1), radius: 2, x: 0, y: 1)
         )
+    }
+}
+
+struct TransparentGroupBox: GroupBoxStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        VStack(alignment: .leading) {
+            configuration.label
+                .font(.headline)
+                .foregroundColor(Theme.primaryColor)
+            
+            configuration.content
+                .padding(.top, 5)
+        }
+        .padding()
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(Color.clear)
+                .shadow(color: Color.clear, radius: 0, x: 0, y: 0)
+        )
+    }
+}
+
+struct PrimaryButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
+            .background(Theme.primaryColor)
+            .foregroundColor(.white)
+            .cornerRadius(8)
+            .opacity(configuration.isPressed ? 0.8 : 1.0)
+    }
+}
+
+struct SecondaryButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
+            .background(Theme.backgroundColor)
+            .foregroundColor(Theme.primaryColor)
+            .cornerRadius(8)
+            .overlay(
+                RoundedRectangle(cornerRadius: 8)
+                    .stroke(Theme.primaryColor, lineWidth: 1)
+            )
+            .opacity(configuration.isPressed ? 0.8 : 1.0)
     }
 }

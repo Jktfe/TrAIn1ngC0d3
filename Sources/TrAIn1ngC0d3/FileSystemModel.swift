@@ -80,28 +80,33 @@ class FileSystemModel: ObservableObject {
     @Published var fileItems: [FileItem] = []
     @Published var selectedFiles: Set<FileItem> = []
     @Published var savedSummaries: [SavedSummary] = []
-    @Published var lastClickedFileName: String = ""
+    @Published var lastClickedFileName: String?
+    @Published var lastClickedFilePath: String?
     @Published var lastClickedFileContent: String = ""
     @Published var fileImports: [String: Set<String>] = [:]
     @Published var fileExports: [String: Set<String>] = [:]
+    @Published var showComments: Bool = true
     var rootPath: String?
     
     struct SavedSummary: Identifiable, Codable {
-        var id: UUID
+        var id: String
         let fileName: String
         let content: String
         var isIncluded: Bool
+        let timestamp: Date
         
-        init(fileName: String, content: String) {
-            self.id = UUID()
+        init(id: String = UUID().uuidString, fileName: String, content: String, timestamp: Date = Date()) {
+            self.id = id
             self.fileName = fileName
             self.content = content
             self.isIncluded = true
+            self.timestamp = timestamp
         }
     }
     
     init() {
         self.config = Config()
+        loadSavedSummaries()
     }
     
     func loadDirectory(at url: URL) {
@@ -133,7 +138,11 @@ class FileSystemModel: ObservableObject {
         }
         
         fileImports[file] = imports
-        fileExports[file] = exports
+        if fileExports[file] == nil {
+            fileExports[file] = exports
+        } else {
+            fileExports[file]?.formUnion(exports)
+        }
     }
     
     private func listDirectory(_ path: String, showHidden: Bool) -> [FileItem] {
@@ -196,6 +205,7 @@ class FileSystemModel: ObservableObject {
         guard !item.isDirectory else { return }
         
         lastClickedFileName = item.path
+        lastClickedFilePath = item.path
         if let content = try? String(contentsOfFile: item.path) {
             if item.includeComments {
                 lastClickedFileContent = content
@@ -250,1040 +260,324 @@ class FileSystemModel: ObservableObject {
     
     func previewFileContent(for item: FileItem) {
         guard !item.isDirectory else { return }
-        lastClickedFileName = item.name
-        if let content = try? String(contentsOfFile: item.path) {
-            if item.includeComments {
-                lastClickedFileContent = content
-            } else {
-                lastClickedFileContent = stripComments(from: content)
-            }
+        
+        lastClickedFileName = item.path
+        lastClickedFilePath = item.path
+        if let content = try? String(contentsOfFile: item.path, encoding: .utf8) {
+            lastClickedFileContent = content
+            analyzeFileImportsAndExports(content, filePath: item.path)
+        } else {
+            lastClickedFileContent = "Unable to read file content"
         }
     }
     
-    func generateSummary(for url: URL, content: String) async -> String {
-        var summary = ""
+    private func analyzeFileImportsAndExports(_ content: String, filePath: String) {
+        // Clear existing entries for this file
+        fileImports[filePath] = Set<String>()
+        fileExports[filePath] = Set<String>()
         
-        // Start with the main purpose
-        summary += "Code Purpose:\n"
+        let fileExtension = (filePath as NSString).pathExtension.lowercased()
+        let currentDir = (filePath as NSString).deletingLastPathComponent
         
-        // Get the main type declarations to understand what we're looking at
-        let mainTypes = content.components(separatedBy: .newlines)
-            .filter { line in
-                let trimmed = line.trimmingCharacters(in: .whitespaces)
-                return trimmed.hasPrefix("class ") || trimmed.hasPrefix("struct ") || 
-                       trimmed.hasPrefix("enum ") || trimmed.hasPrefix("protocol ")
-            }
-            .map { $0.trimmingCharacters(in: .whitespaces) }
-        
-        // Get functions to understand capabilities
-        let functions = content.components(separatedBy: .newlines)
-            .filter { line in
-                let trimmed = line.trimmingCharacters(in: .whitespaces)
-                return trimmed.hasPrefix("func ") || trimmed.hasPrefix("private func ") || 
-                       trimmed.hasPrefix("public func ") || trimmed.hasPrefix("internal func ")
-            }
-            .map { $0.trimmingCharacters(in: .whitespaces) }
-        
-        // Get properties to understand state
-        let properties = content.components(separatedBy: .newlines)
-            .filter { line in
-                let trimmed = line.trimmingCharacters(in: .whitespaces)
-                return (trimmed.hasPrefix("var ") || trimmed.hasPrefix("let ")) && 
-                       !trimmed.contains("init(") && !trimmed.contains(" = {")
-            }
-            .map { $0.trimmingCharacters(in: .whitespaces) }
-        
-        // Determine the high-level purpose based on content analysis
-        if content.contains("View") && content.contains("import SwiftUI") {
-            summary += "This is a SwiftUI view that "
-            
-            if mainTypes.contains(where: { $0.contains("NavigationView") }) || functions.contains(where: { $0.contains("navigate") }) {
-                summary += "handles navigation between different screens. "
-            }
-            
-            if properties.contains(where: { $0.contains("@State") || $0.contains("@Binding") }) {
-                summary += "manages user interface state. "
-            }
-            
-            if properties.contains(where: { $0.contains("@ObservedObject") || $0.contains("@StateObject") }) {
-                summary += "observes and reacts to data model changes. "
-            }
-            
-            // Describe what the view displays
-            if content.contains("List") {
-                summary += "It displays a list of items"
-                if let itemType = properties.first(where: { $0.contains("items:") || $0.contains("Array<") })?.components(separatedBy: ":").last {
-                    summary += " of type \(itemType.trimmingCharacters(in: .whitespaces))"
+        // First pass: collect all exports from all files
+        if fileExports.isEmpty {
+            for file in fileItems where !file.isDirectory {
+                if let fileContent = try? String(contentsOfFile: file.path, encoding: .utf8) {
+                    collectExports(from: fileContent, filePath: file.path)
                 }
-                summary += ". "
-            } else if content.contains("Form") {
-                summary += "It presents a form for user input. "
-            } else if content.contains("TabView") {
-                summary += "It organizes content in tabs. "
-            }
-            
-            // Describe user interactions
-            if functions.contains(where: { $0.contains("tap") || $0.contains("click") || $0.contains("select") }) {
-                summary += "Users can interact with elements through taps/clicks. "
-            }
-            
-            if functions.contains(where: { $0.contains("save") || $0.contains("update") || $0.contains("delete") }) {
-                summary += "It allows users to modify data. "
-            }
-            
-        } else if content.contains("ViewModel") || content.contains("ObservableObject") {
-            summary += "This is a ViewModel that "
-            
-            // Describe what kind of data it manages
-            let publishedProperties = properties.filter { $0.contains("@Published") }
-            if !publishedProperties.isEmpty {
-                summary += "manages and publishes changes to: "
-                for prop in publishedProperties.prefix(3) {
-                    if let propName = prop.components(separatedBy: "=").first?.components(separatedBy: " ").last {
-                        summary += "\(propName), "
-                    }
-                }
-                summary = String(summary.dropLast(2)) + ". "
-            }
-            
-            // Describe its responsibilities
-            if functions.contains(where: { $0.contains("fetch") || $0.contains("load") }) {
-                summary += "It loads data from external sources. "
-            }
-            if functions.contains(where: { $0.contains("save") || $0.contains("update") }) {
-                summary += "It handles data persistence. "
-            }
-            if functions.contains(where: { $0.contains("validate") || $0.contains("check") }) {
-                summary += "It performs data validation. "
-            }
-            
-        } else if mainTypes.contains(where: { $0.contains("Model") }) {
-            summary += "This is a data model that "
-            
-            if content.contains("Codable") {
-                summary += "can be encoded/decoded for data persistence. "
-            }
-            
-            // Describe what it models
-            let properties = properties.filter { !$0.contains("private") }
-            if !properties.isEmpty {
-                summary += "It represents an entity with properties like: "
-                for prop in properties.prefix(3) {
-                    if let propName = prop.components(separatedBy: ":").first?.components(separatedBy: " ").last {
-                        summary += "\(propName), "
-                    }
-                }
-                summary = String(summary.dropLast(2)) + ". "
-            }
-            
-        } else if content.contains("extension ") {
-            summary += "This file extends existing types with additional functionality. "
-            
-            // List what's being extended
-            let extensions = content.components(separatedBy: .newlines)
-                .filter { $0.contains("extension ") }
-                .map { $0.replacingOccurrences(of: "extension ", with: "").trimmingCharacters(in: .whitespaces) }
-            
-            if !extensions.isEmpty {
-                summary += "It adds capabilities to: "
-                summary += extensions.joined(separator: ", ") + ". "
-            }
-            
-            // Describe what capabilities are added
-            if !functions.isEmpty {
-                summary += "New functions include: "
-                for function in functions.prefix(3) {
-                    if let funcName = function.components(separatedBy: "(").first?.components(separatedBy: " ").last {
-                        summary += "\(funcName), "
-                    }
-                }
-                summary = String(summary.dropLast(2)) + ". "
             }
         }
         
-        summary += "\n\n"
-        
-        // Add imports analysis
-        if let imports = fileImports[url.path] {
-            summary += "Dependencies:\n"
-            for imp in imports {
-                summary += "- \(imp)\n"
-            }
-            summary += "\n"
-        }
-        
-        // Add exports analysis
-        if let exports = fileExports[url.path] {
-            summary += "Public Interfaces:\n"
-            for exp in exports {
-                summary += "- \(exp)\n"
-            }
-            summary += "\n"
-        }
-        
-        // Add language-specific analysis
-        let fileExtension = url.pathExtension.lowercased()
-        summary += await analyzeLanguageSpecific(content: content, fileExtension: fileExtension)
-        
-        return summary
-    }
-    
-    private func analyzeLanguageSpecific(content: String, fileExtension: String) async -> String {
-        var analysis = ""
-        
-        // Language-specific analysis
         switch fileExtension {
+        case "ts", "svelte", "js":
+            analyzeJavaScriptLikeFile(content, filePath: filePath, currentDir: currentDir)
         case "swift":
-            analysis += await analyzeSwift(content)
-        case "sql":
-            analysis += await analyzeSQL(content)
-        case "js", "ts", "jsx", "tsx":
-            analysis += await analyzeJavaScript(content)
-        case "dockerfile":
-            analysis += await analyzeDockerfile(content)
-        case "py":
-            analysis += await analyzePython(content)
+            analyzeSwiftFile(content, filePath: filePath, currentDir: currentDir)
         default:
-            // For unknown file types, use general NLP analysis
-            analysis += await analyzeWithNLP(content)
+            break
         }
-        
-        // Add code complexity metrics for all files
-        analysis += await analyzeComplexity(content)
-        
-        // Add NLP analysis for all files except Dockerfile
-        if fileExtension != "dockerfile" {
-            analysis += await analyzeWithNLP(content)
-        }
-        
-        return analysis
     }
     
-    private func analyzeWithNLP(_ content: String) async -> String {
-        var analysis = "\nAdvanced Code Analysis:\n"
-        
-        // Initialize NLP components with expanded schemes
-        let tagger = NLTagger(tagSchemes: [.nameType, .lexicalClass, .lemma, .language, .script])
-        tagger.string = content
-        
-        // 1. Enhanced Comment Analysis
-        let commentAnalysis = await analyzeComments(content)
-        analysis += commentAnalysis
-        
-        // 2. Code Quality Metrics
-        analysis += await analyzeCodeQualityMetrics(content)
-        
-        // 3. Semantic Code Analysis
-        let semanticAnalysis = await analyzeSemantics(content, tagger: tagger)
-        analysis += semanticAnalysis
-        
-        return analysis
-    }
-    
-    private func analyzeCodeQualityMetrics(_ content: String) async -> String {
-        var analysis = "\nCode Quality Metrics:\n"
-        
-        // Naming Convention Analysis
-        var camelCaseCount = 0
-        var snakeCaseCount = 0
-        var pascalCaseCount = 0
-        
-        let camelCasePattern = try? NSRegularExpression(pattern: "^[a-z][a-zA-Z0-9]*$")
-        let snakeCasePattern = try? NSRegularExpression(pattern: "^[a-z][a-z0-9_]*$")
-        let pascalCasePattern = try? NSRegularExpression(pattern: "^[A-Z][a-zA-Z0-9]*$")
-        
-        let words = content.components(separatedBy: .whitespacesAndNewlines)
-        for word in words {
-            let range = NSRange(location: 0, length: word.utf16.count)
-            
-            if camelCasePattern?.firstMatch(in: word, range: range) != nil {
-                camelCaseCount += 1
-            }
-            if snakeCasePattern?.firstMatch(in: word, range: range) != nil {
-                snakeCaseCount += 1
-            }
-            if pascalCasePattern?.firstMatch(in: word, range: range) != nil {
-                pascalCaseCount += 1
-            }
-        }
-        
-        let total = Double(camelCaseCount + snakeCaseCount + pascalCaseCount)
-        if total > 0 {
-            let camelPercent = Int(Double(camelCaseCount) / total * 100)
-            let snakePercent = Int(Double(snakeCaseCount) / total * 100)
-            let pascalPercent = Int(Double(pascalCaseCount) / total * 100)
-            
-            analysis += "Naming Conventions:\n"
-            analysis += "- camelCase: \(camelPercent)%\n"
-            analysis += "- snake_case: \(snakePercent)%\n"
-            analysis += "- PascalCase: \(pascalPercent)%\n"
-            
-            if max(camelPercent, snakePercent, pascalPercent) < 60 {
-                analysis += "Warning: Inconsistent naming conventions\n"
-            }
-        }
-        
-        return analysis
-    }
-    
-    private func analyzeJavaScript(_ content: String) async -> String {
-        var analysis = "\nJavaScript Analysis:\n"
-        
-        // Check for React usage
-        if content.contains("import React") || content.contains("from 'react'") {
-            analysis += "- Uses React framework\n"
-            if content.contains("useState") || content.contains("useEffect") {
-                analysis += "  - Implements React Hooks\n"
-            }
-            if content.contains("useContext") {
-                analysis += "  - Uses Context API for state management\n"
-            }
-        }
-        
-        // Check for modern JS features
-        if content.contains("async") && content.contains("await") {
-            analysis += "- Uses async/await for asynchronous operations\n"
-        }
-        if content.contains("class") && content.contains("extends") {
-            analysis += "- Uses ES6+ class inheritance\n"
-        }
-        if content.contains("=>") {
-            analysis += "- Uses arrow functions\n"
-        }
-        
-        return analysis
-    }
-    
-    private func analyzePython(_ content: String) async -> String {
-        var analysis = "\nPython Analysis:\n"
-        
-        // Check for data science libraries
-        if content.contains("import pandas") || content.contains("import numpy") {
-            analysis += "- Uses data science libraries\n"
-            if content.contains("DataFrame") {
-                analysis += "  - Implements pandas DataFrames\n"
-            }
-            if content.contains("np.array") {
-                analysis += "  - Uses NumPy arrays\n"
-            }
-        }
-        
-        // Check for async features
-        if content.contains("async def") {
-            analysis += "- Uses async/await for asynchronous operations\n"
-        }
-        
-        // Check for type hints
-        if content.contains(": ") && content.contains(" ->") {
-            analysis += "- Uses type hints\n"
-        }
-        
-        return analysis
-    }
-    
-    private func analyzeSwift(_ content: String) async -> String {
-        var analysis = "\nSwift Analysis:\n"
-        let lines = content.components(separatedBy: .newlines)
-        
-        // Modern Swift Features
-        analysis += "\nModern Swift Features:\n"
-        
-        // Property Wrappers
-        if content.contains("@propertyWrapper") {
-            analysis += "- Uses Property Wrappers:\n"
-            for line in lines where line.contains("@propertyWrapper") {
-                if let name = line.components(separatedBy: "struct ").last?.components(separatedBy: ":").first {
-                    analysis += "  - \(name.trimmingCharacters(in: .whitespaces))\n"
-                }
-            }
-        }
-        
-        // Result Builders
-        if content.contains("@resultBuilder") {
-            analysis += "- Uses Result Builders:\n"
-            for line in lines where line.contains("@resultBuilder") {
-                if let name = line.components(separatedBy: "struct ").last?.components(separatedBy: ":").first {
-                    analysis += "  - \(name.trimmingCharacters(in: .whitespaces))\n"
-                }
-            }
-        }
-        
-        // Async/Await
-        var hasAsync = false
-        if content.contains("async") {
-            hasAsync = true
-            analysis += "- Uses Async/Await Pattern\n"
-            if content.contains("AsyncSequence") {
-                analysis += "  - Implements AsyncSequence\n"
-            }
-            if content.contains("withTaskGroup") || content.contains("withThrowingTaskGroup") {
-                analysis += "  - Uses Task Groups for concurrency\n"
-            }
-        }
-        
-        // Actors
-        if content.contains("actor ") {
-            analysis += "- Uses Actor Model for concurrency\n"
-            if content.contains("nonisolated") {
-                analysis += "  - Uses nonisolated members\n"
-            }
-            if content.contains("@MainActor") {
-                analysis += "  - Uses MainActor isolation\n"
-            }
-        }
-        
-        // SwiftUI Integration
-        analysis += "\nSwiftUI Features:\n"
-        
-        let swiftUIFeatures: [(pattern: String, description: String)] = [
-            ("@State ", "State Management"),
-            ("@Binding", "Binding Properties"),
-            ("@ObservedObject", "Observable Objects"),
-            ("@StateObject", "State Objects"),
-            ("@EnvironmentObject", "Environment Objects"),
-            ("@Environment", "Environment Values"),
-            ("@ViewBuilder", "Custom View Builders"),
-            ("@FetchRequest", "Core Data Integration"),
-            ("GeometryReader", "Dynamic Layout"),
-            ("PreferenceKey", "View Preferences")
+    private func collectExports(from content: String, filePath: String) {
+        let exportPatterns = [
+            // JavaScript/TypeScript patterns
+            "export\\s+(const|let|var|function|class|interface|type)\\s+([A-Za-z0-9_]+)",
+            "export\\s+\\{([^}]+)\\}",
+            "export\\s+default\\s+([A-Za-z0-9_]+)",
+            // Swift patterns
+            "public\\s+(class|struct|enum|protocol|func|var|let)\\s+([A-Za-z0-9_]+)",
+            "public\\s+protocol\\s+([A-Za-z0-9_]+)",
+            // General patterns
+            "^\\s*(class|struct|enum|interface)\\s+([A-Za-z0-9_]+)"
         ]
         
-        var usedFeatures = false
-        for (pattern, description) in swiftUIFeatures {
-            if content.contains(pattern) {
-                if !usedFeatures {
-                    usedFeatures = true
+        for pattern in exportPatterns {
+            if let regex = try? NSRegularExpression(pattern: pattern) {
+                let range = NSRange(content.startIndex..., in: content)
+                let matches = regex.matches(in: content, range: range)
+                
+                for match in matches {
+                    let lastGroup = match.numberOfRanges - 1
+                    if let exportRange = Range(match.range(at: lastGroup), in: content) {
+                        let exports = String(content[exportRange])
+                            .components(separatedBy: ",")
+                            .map { $0.trimmingCharacters(in: .whitespaces) }
+                            .filter { !$0.isEmpty }
+                        
+                        fileExports[filePath, default: Set()].formUnion(exports)
+                    }
                 }
-                analysis += "- \(description)\n"
             }
         }
-        
-        if !usedFeatures {
-            analysis += "- No SwiftUI features detected\n"
-        }
-        
-        // Combine Framework
-        analysis += "\nCombine Framework Usage:\n"
-        
-        let combineFeatures: [(pattern: String, description: String)] = [
-            ("Publisher", "Publishers"),
-            ("Subscriber", "Subscribers"),
-            ("Subject", "Subjects"),
-            ("CurrentValueSubject", "Current Value Subjects"),
-            ("PassthroughSubject", "Passthrough Subjects"),
-            ("sink", "Sink Subscribers"),
-            ("assign", "Property Assignment"),
-            ("map", "Value Transformation"),
-            ("flatMap", "Publisher Transformation"),
-            ("combineLatest", "Multiple Publisher Combination"),
-            ("merge", "Publisher Merging"),
-            ("debounce", "Value Debouncing"),
-            ("throttle", "Value Throttling")
+    }
+    
+    private func analyzeJavaScriptLikeFile(_ content: String, filePath: String, currentDir: String) {
+        // Analyze imports
+        let importPatterns = [
+            "import\\s*\\{([^}]+)\\}\\s*from\\s*['\"]([^'\"]+)['\"]",
+            "import\\s+([A-Za-z0-9_]+)\\s+from\\s*['\"]([^'\"]+)['\"]",
+            "import\\s*\\*\\s*as\\s+([A-Za-z0-9_]+)\\s+from\\s*['\"]([^'\"]+)['\"]",
+            "require\\(['\"]([^'\"]+)['\"]\\)"
         ]
         
-        var usesCombine = false
-        for (pattern, description) in combineFeatures {
-            if content.contains(pattern) {
-                if !usesCombine {
-                    usesCombine = true
-                }
-                analysis += "- \(description)\n"
-            }
-        }
-        
-        if !usesCombine {
-            analysis += "- No Combine framework usage detected\n"
-        }
-        
-        // Swift Concurrency
-        if hasAsync {
-            analysis += "\nConcurrency Patterns:\n"
-            
-            let concurrencyFeatures: [(pattern: String, description: String)] = [
-                ("Task {", "Task Creation"),
-                ("Task.detached", "Detached Tasks"),
-                ("await", "Async/Await"),
-                ("async let", "Concurrent Let Bindings"),
-                ("withTaskGroup", "Task Groups"),
-                ("withThrowingTaskGroup", "Error Handling Task Groups"),
-                ("@MainActor", "Main Actor Isolation"),
-                ("actor ", "Actor Types"),
-                ("AsyncSequence", "Async Sequences"),
-                ("AsyncStream", "Async Streams")
-            ]
-            
-            for (pattern, description) in concurrencyFeatures {
-                if content.contains(pattern) {
-                    analysis += "- \(description)\n"
+        for pattern in importPatterns {
+            if let regex = try? NSRegularExpression(pattern: pattern) {
+                let range = NSRange(content.startIndex..., in: content)
+                let matches = regex.matches(in: content, range: range)
+                
+                for match in matches {
+                    if let importRange = Range(match.range(at: match.numberOfRanges - 1), in: content) {
+                        let importPath = String(content[importRange])
+                        
+                        if importPath.hasPrefix(".") {
+                            // Resolve relative path
+                            let resolvedPath = (currentDir as NSString).appendingPathComponent(importPath)
+                            let normalizedPath = (resolvedPath as NSString).standardizingPath
+                            
+                            // Try different extensions if the file doesn't exist
+                            let extensions = ["", ".ts", ".js", ".svelte", ".swift"]
+                            for ext in extensions {
+                                let fullPath = normalizedPath + ext
+                                if FileManager.default.fileExists(atPath: fullPath) {
+                                    fileImports[filePath, default: Set()].insert(fullPath)
+                                    break
+                                }
+                            }
+                        } else {
+                            fileImports[filePath, default: Set()].insert(importPath)
+                        }
+                    }
                 }
             }
         }
-        
-        // Protocol Conformance
-        analysis += "\nProtocol Conformance:\n"
-        let commonProtocols = [
-            "Codable", "Hashable", "Equatable", "Comparable", "Identifiable",
-            "CustomStringConvertible", "CaseIterable", "RawRepresentable"
+    }
+    
+    private func analyzeSwiftFile(_ content: String, filePath: String, currentDir: String) {
+        // Analyze imports
+        let importPatterns = [
+            "import\\s+([A-Za-z0-9_\\.]+)",
+            "@testable\\s+import\\s+([A-Za-z0-9_\\.]+)"
         ]
         
-        var foundProtocols = false
-        for proto in commonProtocols {
-            if content.contains(proto) {
-                if !foundProtocols {
-                    foundProtocols = true
-                }
-                analysis += "- Conforms to \(proto)\n"
-            }
-        }
-        
-        if !foundProtocols {
-            analysis += "- No common protocol conformance detected\n"
-        }
-        
-        // Memory Management
-        analysis += "\nMemory Management:\n"
-        
-        if content.contains("weak ") {
-            analysis += "- Uses weak references\n"
-        }
-        if content.contains("unowned ") {
-            analysis += "- Uses unowned references\n"
-        }
-        
-        // Error Handling
-        let errorPatterns = content.matches(of: try! Regex("(throws|throw|catch|try\\?|try!|do\\s*\\{)"))
-        if !errorPatterns.isEmpty {
-            analysis += "\nError Handling:\n"
-            if content.contains("throws") {
-                analysis += "- Uses throwing functions\n"
-            }
-            if content.contains("try?") {
-                analysis += "- Uses optional try\n"
-            }
-            if content.contains("try!") {
-                analysis += "- Warning: Uses force try\n"
-            }
-            if content.contains("catch") {
-                analysis += "- Implements error catching\n"
-            }
-        }
-        
-        // Type System Usage
-        analysis += "\nType System Features:\n"
-        
-        if content.contains("associatedtype") {
-            analysis += "- Uses associated types\n"
-        }
-        if content.contains("some ") {
-            analysis += "- Uses opaque return types\n"
-        }
-        if content.contains("any ") {
-            analysis += "- Uses existential types\n"
-        }
-        if content.contains("where ") && (content.contains("extension") || content.contains("func")) {
-            analysis += "- Uses generic constraints\n"
-        }
-        
-        return analysis
-    }
-    
-    private func analyzeSQL(_ content: String) async -> String {
-        var analysis = "\nSQL Analysis:\n"
-        
-        // Detect SQL flavor and features
-        if content.contains("ILIKE") || content.contains("RETURNING") || content.contains("JSONB") {
-            analysis += "- PostgreSQL detected:\n"
-            if content.contains("JSONB") {
-                analysis += "  - Uses JSONB data type\n"
-                if content.contains("->") || content.contains("->>") {
-                    analysis += "  - Uses JSON operators\n"
-                }
-                if content.contains("@>") || content.contains("<@") {
-                    analysis += "  - Uses containment operators\n"
-                }
-            }
-            if content.contains("WITH RECURSIVE") {
-                analysis += "  - Uses recursive CTEs\n"
-            }
-        } else if content.contains("LIMIT 1,1") || content.contains("JSON_EXTRACT") {
-            analysis += "- MySQL detected:\n"
-            if content.contains("JSON_EXTRACT") {
-                analysis += "  - Uses JSON functions\n"
-            }
-            if content.contains("PARTITION BY") {
-                analysis += "  - Uses partitioning\n"
-            }
-        } else if content.contains("TOP") || content.contains("CROSS APPLY") {
-            analysis += "- SQL Server detected:\n"
-            if content.contains("FOR XML") || content.contains("FOR JSON") {
-                analysis += "  - Uses XML/JSON features\n"
-            }
-            if content.contains("TRY_CONVERT") {
-                analysis += "  - Uses error handling functions\n"
-            }
-        }
-        
-        return analysis
-    }
-    
-    private func analyzeMongoDBOperations(_ content: String) async -> String {
-        var analysis = "\nMongoDB Analysis:\n"
-        
-        // CRUD Operations
-        if content.contains(".find(") {
-            analysis += "- Read Operations:\n"
-            if content.contains(".aggregate(") {
-                analysis += "  - Uses aggregation pipeline\n"
-                if content.contains("$lookup") {
-                    analysis += "  - Performs collection joins\n"
-                }
-                if content.contains("$group") {
-                    analysis += "  - Uses grouping operations\n"
-                }
-            }
-            if content.contains(".findOne(") {
-                analysis += "  - Single document queries\n"
-            }
-        }
-        
-        if content.contains(".insert") {
-            analysis += "- Write Operations:\n"
-            if content.contains(".insertMany(") {
-                analysis += "  - Bulk inserts\n"
-            }
-            if content.contains("ordered: false") {
-                analysis += "  - Uses unordered bulk operations\n"
-            }
-        }
-        
-        // Indexing
-        if content.contains(".createIndex(") {
-            analysis += "\nIndex Operations:\n"
-            if content.contains("unique:") {
-                analysis += "- Creates unique indexes\n"
-            }
-            if content.contains("sparse:") {
-                analysis += "- Uses sparse indexes\n"
-            }
-            if content.contains("text:") {
-                analysis += "- Implements text search indexes\n"
-            }
-        }
-        
-        // Advanced Features
-        if content.contains(".watch(") {
-            analysis += "\nAdvanced Features:\n"
-            analysis += "- Uses change streams\n"
-        }
-        if content.contains("$graphLookup") {
-            analysis += "- Implements graph operations\n"
-        }
-        
-        // Performance Considerations
-        if content.contains(".explain(") {
-            analysis += "\nPerformance Analysis:\n"
-            analysis += "- Uses query explanation\n"
-        }
-        
-        return analysis
-    }
-    
-    private func analyzeDockerfile(_ content: String) async -> String {
-        var analysis = "\nDockerfile Analysis:\n"
-        let lines = content.components(separatedBy: .newlines)
-        
-        // Base Image Analysis
-        if let baseImage = lines.first(where: { $0.hasPrefix("FROM") }) {
-            analysis += "Base Image:\n"
-            if baseImage.contains("alpine") {
-                analysis += "- Uses Alpine Linux (minimal size)\n"
-            } else if baseImage.contains("slim") {
-                analysis += "- Uses slim variant\n"
-            }
-            if baseImage.contains(":latest") {
-                analysis += "- Warning: Using 'latest' tag (consider using specific version)\n"
-            }
-        }
-        
-        // Build Optimization
-        if lines.filter({ $0.hasPrefix("FROM") }).count > 1 {
-            analysis += "\nBuild Optimization:\n"
-            analysis += "- Uses multi-stage builds\n"
-            if content.contains("COPY --from=") {
-                analysis += "- Copies artifacts between stages\n"
-            }
-        }
-        
-        // Cache Optimization
-        var cacheScore = 0
-        analysis += "\nCache Optimization:\n"
-        if content.contains("COPY package*.json") {
-            analysis += "- Optimizes dependency caching\n"
-            cacheScore += 1
-        }
-        if content.contains("RUN --mount=type=cache") {
-            analysis += "- Uses BuildKit cache mounting\n"
-            cacheScore += 2
-        }
-        
-        // Security Analysis
-        analysis += "\nSecurity Analysis:\n"
-        if !content.contains("USER ") {
-            analysis += "- Warning: No user specified (runs as root)\n"
-        }
-        if content.contains("chmod 777") {
-            analysis += "- Warning: Overly permissive file permissions\n"
-        }
-        if content.contains("COPY --chown=") {
-            analysis += "- Sets proper file ownership\n"
-        }
-        if !content.contains("HEALTHCHECK") {
-            analysis += "- Warning: No health check defined\n"
-        }
-        
-        // Best Practices
-        analysis += "\nBest Practices:\n"
-        if content.contains("HEALTHCHECK") {
-            analysis += "- Implements health checks\n"
-        }
-        if content.contains("ONBUILD") {
-            analysis += "- Uses ONBUILD triggers\n"
-        }
-        if content.contains("ARG") {
-            analysis += "- Uses build arguments for configuration\n"
-        }
-        if content.contains("ENTRYPOINT") && content.contains("CMD") {
-            analysis += "- Properly configures ENTRYPOINT with CMD\n"
-        }
-        
-        // Size Optimization
-        analysis += "\nSize Optimization:\n"
-        if content.contains("rm -rf") && content.contains("/var/cache") {
-            analysis += "- Cleans package cache\n"
-        }
-        if content.contains("--no-cache") {
-            analysis += "- Uses no-cache flag for package managers\n"
-        }
-        if lines.contains(where: { $0.contains("&&") && $0.contains("\\") }) {
-            analysis += "- Combines RUN commands to reduce layers\n"
-        }
-        
-        // Runtime Configuration
-        analysis += "\nRuntime Configuration:\n"
-        if content.contains("ENV ") {
-            analysis += "- Sets environment variables\n"
-        }
-        if content.contains("VOLUME") {
-            analysis += "- Defines persistent storage\n"
-        }
-        if content.contains("EXPOSE") {
-            analysis += "- Exposes ports\n"
-        }
-        
-        return analysis
-    }
-    
-    private func analyzeSvelte(_ content: String) async -> String {
-        var analysis = "\nSvelte Analysis:\n"
-        
-        // Component Structure
-        if content.contains("<script") {
-            analysis += "- Contains script section\n"
-            if content.contains("export let") {
-                analysis += "  - Uses props\n"
-            }
-            if content.contains("$:") {
-                analysis += "  - Uses reactive declarations\n"
-            }
-            if content.contains("onMount") {
-                analysis += "  - Uses lifecycle methods\n"
-            }
-        }
-        
-        // Stores
-        if content.contains("import { writable }") || content.contains("import { readable }") {
-            analysis += "- Uses Svelte stores for state management\n"
-        }
-        
-        // Transitions and Animations
-        if content.contains("transition:") || content.contains("animate:") {
-            analysis += "- Implements animations/transitions\n"
-        }
-        
-        // Actions
-        if content.contains("use:") {
-            analysis += "- Uses Svelte actions\n"
-        }
-        
-        // Event Handling
-        if content.contains("on:") {
-            analysis += "- Uses event handlers\n"
-            if content.contains("preventDefault") {
-                analysis += "  - Implements event modifiers\n"
-            }
-        }
-        
-        return analysis
-    }
-    
-    private func analyzeComments(_ content: String) async -> String {
-        var analysis = "\nComment Analysis:\n"
-        
-        // Extract comments
-        var comments: [String] = []
-        var docComments: [String] = []
-        var inDocComment = false
-        
-        for line in content.components(separatedBy: .newlines) {
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            if trimmed.hasPrefix("///") || trimmed.hasPrefix("/**") {
-                inDocComment = true
-                let comment = trimmed.replacingOccurrences(of: "///", with: "")
-                    .replacingOccurrences(of: "/**", with: "")
-                    .trimmingCharacters(in: .whitespaces)
-                docComments.append(comment)
-            } else if trimmed.hasPrefix("*/") {
-                inDocComment = false
-            } else if inDocComment {
-                let comment = trimmed.replacingOccurrences(of: "*", with: "")
-                    .trimmingCharacters(in: .whitespaces)
-                if !comment.isEmpty {
-                    docComments.append(comment)
-                }
-            } else if trimmed.hasPrefix("//") || trimmed.hasPrefix("/*") {
-                let comment = trimmed.replacingOccurrences(of: "//", with: "")
-                    .replacingOccurrences(of: "/*", with: "")
-                    .trimmingCharacters(in: .whitespaces)
-                if !comment.isEmpty {
-                    comments.append(comment)
+        for pattern in importPatterns {
+            if let regex = try? NSRegularExpression(pattern: pattern) {
+                let range = NSRange(content.startIndex..., in: content)
+                let matches = regex.matches(in: content, range: range)
+                
+                for match in matches {
+                    if let importRange = Range(match.range(at: 1), in: content) {
+                        let importName = String(content[importRange])
+                        fileImports[filePath, default: Set()].insert(importName)
+                    }
                 }
             }
         }
         
-        // Documentation Coverage Analysis
-        if !docComments.isEmpty {
-            analysis += "\nDocumentation Coverage:\n"
-            let docText = docComments.joined(separator: " ")
-            
-            // Check for key documentation components
-            let hasParameters = docText.contains("@param") || docText.contains("- Parameter")
-            let hasReturns = docText.contains("@return") || docText.contains("- Returns")
-            let hasExamples = docText.contains("Example") || docText.contains("Usage")
-            
-            var docScore = 0
-            if hasParameters { docScore += 1 }
-            if hasReturns { docScore += 1 }
-            if hasExamples { docScore += 1 }
-            
-            analysis += "- Documentation Quality Score: \(docScore)/3\n"
-            if !hasParameters { analysis += "  Warning: Missing parameter documentation\n" }
-            if !hasReturns { analysis += "  Warning: Missing return value documentation\n" }
-            if !hasExamples { analysis += "  Warning: Missing usage examples\n" }
-        }
-        
-        // Technical Debt Analysis
-        let technicalDebtIndicators = [
-            "TODO": "planned enhancement",
-            "FIXME": "known issue",
-            "HACK": "implementation concern",
-            "XXX": "critical concern",
-            "OPTIMIZE": "performance concern",
-            "WORKAROUND": "temporary solution"
+        // Analyze exports (public declarations)
+        let exportPatterns = [
+            "public\\s+(class|struct|enum|protocol|func|var|let)\\s+([A-Za-z0-9_]+)",
+            "public\\s+protocol\\s+([A-Za-z0-9_]+)"
         ]
         
-        var debtAnalysis: [String: [(String, String)]] = [:]
-        for comment in comments {
-            for (indicator, type) in technicalDebtIndicators {
-                if comment.contains(indicator) {
-                    debtAnalysis[type, default: []].append((indicator, comment))
+        for pattern in exportPatterns {
+            if let regex = try? NSRegularExpression(pattern: pattern) {
+                let range = NSRange(content.startIndex..., in: content)
+                let matches = regex.matches(in: content, range: range)
+                
+                for match in matches {
+                    let lastGroup = match.numberOfRanges - 1
+                    if let exportRange = Range(match.range(at: lastGroup), in: content) {
+                        let exportName = String(content[exportRange])
+                        fileExports[filePath, default: Set()].insert(exportName)
+                    }
                 }
             }
         }
+    }
+    
+    func generateSummary(for fileURL: URL, content: String) async -> String {
+        var analysis = ""
+        let fileExtension = fileURL.pathExtension.lowercased()
         
-        if !debtAnalysis.isEmpty {
-            analysis += "\nTechnical Debt Analysis:\n"
-            for (type, items) in debtAnalysis {
-                analysis += "- \(type.capitalized):\n"
-                for (indicator, comment) in items {
-                    analysis += "  [\(indicator)] \(comment)\n"
-                }
+        // Basic file info
+        analysis += "File Analysis:\n"
+        analysis += "-------------\n"
+        analysis += "File Type: \(fileExtension.uppercased())\n"
+        analysis += "Location: \(fileURL.path)\n\n"
+        
+        // Code Purpose
+        analysis += "Code Purpose:\n"
+        analysis += "-------------\n"
+        if let purpose = await analyzePurpose(content, fileExtension: fileExtension) {
+            analysis += purpose + "\n\n"
+        }
+        
+        // Dependencies
+        analysis += "Dependencies:\n"
+        analysis += "-------------\n"
+        if let imports = fileImports[fileURL.path], !imports.isEmpty {
+            for imp in imports.sorted() {
+                analysis += "• \(imp)\n"
             }
+        } else {
+            analysis += "No external dependencies found\n"
+        }
+        analysis += "\n"
+        
+        // Exports
+        analysis += "Public Interfaces:\n"
+        analysis += "----------------\n"
+        if let exports = fileExports[fileURL.path], !exports.isEmpty {
+            for exp in exports.sorted() {
+                analysis += "• \(exp)\n"
+            }
+        } else {
+            analysis += "No public interfaces found\n"
+        }
+        analysis += "\n"
+        
+        // Code Structure
+        analysis += "Code Structure:\n"
+        analysis += "--------------\n"
+        if let structure = await analyzeStructure(content, fileExtension: fileExtension) {
+            analysis += structure + "\n\n"
         }
         
         return analysis
     }
     
-    private func analyzeSemantics(_ content: String, tagger: NLTagger) async -> String {
-        var analysis = "\nSemantic Analysis:\n"
+    private func analyzePurpose(_ content: String, fileExtension: String) async -> String? {
+        var purpose = ""
         
-        // Domain Language Analysis
-        let domainTerms = await extractDomainTerms(from: content)
-        if !domainTerms.isEmpty {
-            analysis += "\nDomain-Specific Language:\n"
-            for (category, terms) in domainTerms {
-                analysis += "- \(category):\n"
-                for term in terms {
-                    analysis += "  - \(term)\n"
+        // Check for file type specific patterns
+        switch fileExtension {
+        case "ts", "js", "svelte":
+            if content.contains("React") || content.contains("Component") {
+                purpose += "This is a React component that "
+                if content.contains("useState") {
+                    purpose += "manages state "
                 }
-            }
-        }
-        
-        // Code Intent Analysis
-        let intentAnalysis = await analyzeCodeIntent(content)
-        if !intentAnalysis.isEmpty {
-            analysis += "\nCode Intent Analysis:\n"
-            for (intent, confidence) in intentAnalysis {
-                analysis += "- \(intent): \(Int(confidence * 100))% confidence\n"
-            }
-        }
-        
-        return analysis
-    }
-    
-    private func extractDomainTerms(from content: String) async -> [String: Set<String>] {
-        var domainTerms: [String: Set<String>] = [:]
-        
-        // Define domain categories and their indicators
-        let domainPatterns: [String: [String]] = [
-            "Data Processing": ["process", "transform", "convert", "parse", "format"],
-            "Authentication": ["auth", "login", "password", "credential", "token"],
-            "Database Operations": ["query", "insert", "update", "delete", "select"],
-            "Network Operations": ["request", "response", "http", "api", "endpoint"],
-            "UI Components": ["view", "button", "label", "window", "screen"],
-            "Error Handling": ["error", "exception", "catch", "throw", "handle"],
-            "Configuration": ["config", "setting", "preference", "option", "setup"]
-        ]
-        
-        let words = content.components(separatedBy: .whitespacesAndNewlines)
-        for (category, patterns) in domainPatterns {
-            var terms = Set<String>()
-            for word in words {
-                if patterns.contains(where: { word.lowercased().contains($0) }) {
-                    terms.insert(word)
+                if content.contains("useEffect") {
+                    purpose += "and handles side effects "
                 }
+            } else if content.contains("export default") {
+                purpose += "This module exports functionality for "
             }
-            if !terms.isEmpty {
-                domainTerms[category] = terms
-            }
-        }
-        
-        return domainTerms
-    }
-    
-    private func analyzeCodeIntent(_ content: String) async -> [(String, Double)] {
-        var intents: [(String, Double)] = []
-        
-        // Define intent patterns and their weights
-        let intentPatterns: [(String, [(pattern: String, weight: Double)])] = [
-            ("Data Validation", [("validate", 0.8), ("check", 0.6), ("verify", 0.7)]),
-            ("Data Transformation", [("convert", 0.8), ("transform", 0.9), ("parse", 0.7)]),
-            ("Security Implementation", [("encrypt", 0.9), ("decrypt", 0.9), ("hash", 0.8)]),
-            ("Caching Logic", [("cache", 0.8), ("store", 0.6), ("retrieve", 0.6)]),
-            ("Error Recovery", [("recover", 0.8), ("retry", 0.7), ("fallback", 0.8)]),
-            ("Performance Optimization", [("optimize", 0.8), ("improve", 0.6), ("enhance", 0.6)])
-        ]
-        
-        for (intent, patterns) in intentPatterns {
-            var confidence = 0.0
-            var matches = 0
             
-            for (pattern, weight) in patterns {
-                if content.lowercased().contains(pattern) {
-                    confidence += weight
-                    matches += 1
+        case "swift":
+            if content.contains("View") && content.contains("SwiftUI") {
+                purpose += "This is a SwiftUI view that "
+                if content.contains("@State") {
+                    purpose += "manages internal state "
+                }
+                if content.contains("@Binding") {
+                    purpose += "and receives external state updates "
+                }
+            } else if content.contains("class") || content.contains("struct") {
+                purpose += "This is a data model that "
+                if content.contains("Codable") {
+                    purpose += "can be encoded/decoded "
                 }
             }
             
-            if matches > 0 {
-                confidence /= Double(patterns.count)
-                if confidence > 0.3 { // Only include if confidence is significant
-                    intents.append((intent, confidence))
-                }
-            }
+        default:
+            purpose += "This is a source file that "
         }
         
-        return intents.sorted { $0.1 > $1.1 }
+        // Look for common patterns
+        if content.contains("fetch") || content.contains("request") || content.contains("URLSession") {
+            purpose += "handles network requests "
+        }
+        if content.contains("save") || content.contains("update") || content.contains("delete") {
+            purpose += "and manages data persistence "
+        }
+        if content.contains("calculate") || content.contains("compute") {
+            purpose += "performs calculations "
+        }
+        
+        return purpose.isEmpty ? nil : purpose.trimmingCharacters(in: .whitespaces) + "."
     }
     
-    private func analyzeComplexity(_ content: String) async -> String {
-        var analysis = "\nComplexity Analysis:\n"
-        let lines = content.components(separatedBy: .newlines)
+    private func analyzeStructure(_ content: String, fileExtension: String) async -> String? {
+        var structure = ""
         
-        // Cyclomatic complexity (rough estimate)
-        let controlFlow = lines.filter { line in
-            let trimmed = line.trimmingCharacters(in: .whitespaces).lowercased()
-            return trimmed.contains("if ") || 
-                   trimmed.contains("for ") || 
-                   trimmed.contains("while ") || 
-                   trimmed.contains("switch ") ||
-                   trimmed.contains("catch ") ||
-                   trimmed.contains("? :")
-        }.count
+        // Count functions
+        let functionPattern = "func\\s+[A-Za-z0-9_]+"
+        if let regex = try? NSRegularExpression(pattern: functionPattern) {
+            let range = NSRange(content.startIndex..., in: content)
+            let matches = regex.matches(in: content, range: range)
+            structure += "Contains \(matches.count) function(s)\n"
+        }
         
-        if controlFlow > 0 {
-            analysis += "- Control flow complexity: \(controlFlow)\n"
-            if controlFlow > 10 {
-                analysis += "  - Warning: High complexity, consider refactoring\n"
+        // Check for classes/structs
+        let typePattern = "(class|struct|enum)\\s+[A-Za-z0-9_]+"
+        if let regex = try? NSRegularExpression(pattern: typePattern) {
+            let range = NSRange(content.startIndex..., in: content)
+            let matches = regex.matches(in: content, range: range)
+            if matches.count > 0 {
+                structure += "Defines \(matches.count) type(s)\n"
             }
         }
         
-        // Nesting depth
-        var maxNesting = 0
-        var currentNesting = 0
-        for line in lines {
-            currentNesting += line.filter { $0 == "{" }.count
-            currentNesting -= line.filter { $0 == "}" }.count
-            maxNesting = max(maxNesting, currentNesting)
+        // Check for comments
+        let commentLines = content.components(separatedBy: .newlines)
+            .filter { $0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }
+            .count
+        if commentLines > 0 {
+            structure += "Contains \(commentLines) comment line(s)\n"
         }
         
-        if maxNesting > 0 {
-            analysis += "- Maximum nesting depth: \(maxNesting)\n"
-            if maxNesting > 4 {
-                analysis += "  - Warning: Deep nesting, consider flattening\n"
-            }
-        }
-        
-        // Function length
-        var currentFunctionLines = 0
-        var maxFunctionLines = 0
-        var inFunction = false
-        
-        for line in lines {
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            
-            // Track function boundaries
-            if trimmed.contains("func ") {
-                inFunction = true
-                currentFunctionLines = 0
-            } else if inFunction {
-                if trimmed == "}" {
-                    inFunction = false
-                    maxFunctionLines = max(maxFunctionLines, currentFunctionLines)
-                } else {
-                    currentFunctionLines += 1
-                }
-            }
-        }
-        
-        if maxFunctionLines > 0 {
-            analysis += "- Longest function: \(maxFunctionLines) lines\n"
-            if maxFunctionLines > 30 {
-                analysis += "  - Warning: Long function, consider breaking it down\n"
-            }
-        }
-        
-        return analysis
+        return structure.isEmpty ? nil : structure
     }
     
     func saveSummary(_ content: String, for fileName: String) {
-        let summary = SavedSummary(fileName: fileName, content: content)
-        savedSummaries.append(summary)
+        let summary = SavedSummary(id: UUID().uuidString,
+                                 fileName: fileName,
+                                 content: content,
+                                 timestamp: Date())
+        
+        // Update or add the summary
+        if let index = savedSummaries.firstIndex(where: { $0.fileName == fileName }) {
+            savedSummaries[index] = summary
+        } else {
+            savedSummaries.append(summary)
+        }
+        
+        // Save to UserDefaults
+        if let encoded = try? JSONEncoder().encode(savedSummaries) {
+            UserDefaults.standard.set(encoded, forKey: "SavedSummaries")
+        }
     }
     
-    func toggleSummary(_ summary: SavedSummary) {
-        if let index = savedSummaries.firstIndex(where: { $0.id == summary.id }) {
-            savedSummaries[index].isIncluded.toggle()
+    func loadSavedSummaries() {
+        if let data = UserDefaults.standard.data(forKey: "SavedSummaries"),
+           let decoded = try? JSONDecoder().decode([SavedSummary].self, from: data) {
+            savedSummaries = decoded
         }
+    }
+    
+    func getSavedSummary(for fileName: String) -> String? {
+        return savedSummaries.first(where: { $0.fileName == fileName })?.content
     }
     
     func generateExport(format: OutputFormat = .json) -> String {
@@ -1348,7 +642,7 @@ class FileSystemModel: ObservableObject {
             for file in selectedFiles where !file.isDirectory {
                 output += "### \(file.name)\n\n"
                 if let content = try? String(contentsOfFile: file.path, encoding: .utf8) {
-                    let processedContent = file.includeComments ? content : stripComments(from: content)
+                    let processedContent = showComments ? content : stripComments(from: content)
                     output += "```\n\(processedContent)\n```\n\n"
                 }
             }
@@ -1357,7 +651,7 @@ class FileSystemModel: ObservableObject {
             for file in selectedFiles where !file.isDirectory {
                 output += "<h3>\(file.name)</h3>\n<pre>\n"
                 if let content = try? String(contentsOfFile: file.path, encoding: .utf8) {
-                    let processedContent = file.includeComments ? content : stripComments(from: content)
+                    let processedContent = showComments ? content : stripComments(from: content)
                     output += processedContent
                         .replacingOccurrences(of: "<", with: "&lt;")
                         .replacingOccurrences(of: ">", with: "&gt;")
@@ -1369,7 +663,7 @@ class FileSystemModel: ObservableObject {
             for file in selectedFiles where !file.isDirectory {
                 output += "=== \(file.name) ===\n\n"
                 if let content = try? String(contentsOfFile: file.path, encoding: .utf8) {
-                    let processedContent = file.includeComments ? content : stripComments(from: content)
+                    let processedContent = showComments ? content : stripComments(from: content)
                     output += "\(processedContent)\n\n"
                 }
             }
@@ -1377,7 +671,7 @@ class FileSystemModel: ObservableObject {
             output += "\"files\": ["
             for file in selectedFiles where !file.isDirectory {
                 if let content = try? String(contentsOfFile: file.path, encoding: .utf8) {
-                    let processedContent = file.includeComments ? content : stripComments(from: content)
+                    let processedContent = showComments ? content : stripComments(from: content)
                     output += "{\"name\": \"\(file.name)\", \"content\": \"\(processedContent)\"},"
                 }
             }
@@ -1388,7 +682,7 @@ class FileSystemModel: ObservableObject {
             for file in selectedFiles where !file.isDirectory {
                 output += "=== \(file.name) ===\n\n"
                 if let content = try? String(contentsOfFile: file.path, encoding: .utf8) {
-                    let processedContent = file.includeComments ? content : stripComments(from: content)
+                    let processedContent = showComments ? content : stripComments(from: content)
                     output += "\(processedContent)\n\n"
                 }
             }
@@ -1463,51 +757,33 @@ class FileSystemModel: ObservableObject {
         .joined()
     }
     
-    private func isHidden(_ path: String) -> Bool {
-        let url = URL(fileURLWithPath: path)
-        let filename = url.lastPathComponent
-        return filename.hasPrefix(".")
-    }
-    
-    private func stripComments(from content: String) -> String {
-        let lines = content.components(separatedBy: .newlines)
-        var inMultilineComment = false
-        var processedLines: [String] = []
+    public func stripComments(from content: String) -> String {
+        var result = content
         
-        for line in lines {
-            var processedLine = line
-            
-            // Handle multi-line comments
-            if inMultilineComment {
-                if let endIndex = processedLine.range(of: "*/")?.upperBound {
-                    processedLine = String(processedLine[endIndex...])
-                    inMultilineComment = false
-                } else {
-                    continue
-                }
-            }
-            
-            // Handle single-line comments
-            if let commentIndex = processedLine.range(of: "//")?.lowerBound {
-                processedLine = String(processedLine[..<commentIndex])
-            }
-            
-            // Handle start of multi-line comments
-            if let startIndex = processedLine.range(of: "/*")?.lowerBound {
-                if let endIndex = processedLine[startIndex...].range(of: "*/")?.upperBound {
-                    let preComment = processedLine[..<startIndex]
-                    let postComment = processedLine[endIndex...]
-                    processedLine = String(preComment) + String(postComment)
-                } else {
-                    processedLine = String(processedLine[..<startIndex])
-                    inMultilineComment = true
-                }
-            }
-            
-            processedLines.append(processedLine)
+        // Remove single-line comments
+        let singleLinePattern = "\\/\\/.*$"
+        if let regex = try? NSRegularExpression(pattern: singleLinePattern, options: .anchorsMatchLines) {
+            result = regex.stringByReplacingMatches(in: result,
+                                                  options: [],
+                                                  range: NSRange(result.startIndex..., in: result),
+                                                  withTemplate: "")
         }
         
-        return processedLines.joined(separator: "\n")
+        // Remove multi-line comments
+        let multiLinePattern = "\\/\\*[\\s\\S]*?\\*\\/"
+        if let regex = try? NSRegularExpression(pattern: multiLinePattern, options: []) {
+            result = regex.stringByReplacingMatches(in: result,
+                                                  options: [],
+                                                  range: NSRange(result.startIndex..., in: result),
+                                                  withTemplate: "")
+        }
+        
+        // Remove empty lines and normalize spacing
+        result = result.components(separatedBy: .newlines)
+            .filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+            .joined(separator: "\n")
+        
+        return result
     }
     
     func getFolderSummary(for item: FileItem) -> String {

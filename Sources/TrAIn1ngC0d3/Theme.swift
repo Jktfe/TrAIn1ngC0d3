@@ -2,10 +2,14 @@ import SwiftUI
 import AppKit
 
 enum Theme {
-    static let primaryColor = Color(red: 0.25, green: 0.35, blue: 0.75) // Refined blue from logo
+    static let primaryColor = Color.blue // Refined blue from logo
     static let secondaryColor = Color(red: 0.75, green: 0.25, blue: 0.35) // Complementary accent
-    static let backgroundColor = Color(red: 0.97, green: 0.97, blue: 0.98) // Lighter background
-    static let textColor = Color(red: 0.15, green: 0.15, blue: 0.2) // Darker text for better contrast
+    static let backgroundColor = Color(red: 0.95, green: 0.95, blue: 0.97) // Lighter background
+    static let textColor = Color.primary // Darker text for better contrast
+    static let borderColor = Color.gray.opacity(0.3)
+    static let errorColor = Color.red
+    static let warningColor = Color.orange
+    static let successColor = Color.green
     
     static let buttonStyle = BorderedButtonStyle()
     
