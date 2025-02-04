@@ -18,7 +18,7 @@ struct SummaryEditView: View {
                     .foregroundColor(Theme.primaryColor)
                 Spacer()
                 Button("Close", action: onCancel)
-                    .buttonStyle(Theme.SecondaryButtonStyle())
+                    .buttonStyle(SecondaryButtonStyle())
             }
             .padding()
             
@@ -30,14 +30,14 @@ struct SummaryEditView: View {
                         Button(action: { isSummaryFocused = true }) {
                             Label("Edit", systemImage: "pencil")
                         }
-                        .buttonStyle(Theme.SecondaryButtonStyle())
+                        .buttonStyle(SecondaryButtonStyle())
                         
                         Spacer()
                         
                         Button(action: onSave) {
                             Label("Save", systemImage: "checkmark")
                         }
-                        .buttonStyle(Theme.BorderedButtonStyle())
+                        .buttonStyle(BorderedButtonStyle(isSelected: false))
                     }
                     .padding()
                     
@@ -91,7 +91,7 @@ struct SummaryEditView: View {
                                 Label("Retry with Comments", systemImage: "arrow.clockwise")
                                     .frame(maxWidth: .infinity)
                             }
-                            .buttonStyle(Theme.SecondaryButtonStyle())
+                            .buttonStyle(SecondaryButtonStyle())
                             .disabled(additionalComments.isEmpty)
                         }
                     }

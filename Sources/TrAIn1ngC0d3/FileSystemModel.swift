@@ -1,30 +1,20 @@
 import SwiftUI
-import Combine
-import Foundation
-import NaturalLanguage
+import UniformTypeIdentifiers
 
 struct FileItem: Identifiable, Hashable {
-    let id = UUID()
+    let id: String
     let name: String
     let path: String
     let isDirectory: Bool
     var children: [FileItem]?
-    var isExpanded: Bool
-    var isExcluded: Bool
-    var includeComments: Bool
+    var isExpanded: Bool = false
     
-    init(name: String, path: String, isDirectory: Bool, children: [FileItem]? = nil, isExpanded: Bool = false, isExcluded: Bool = false, includeComments: Bool = true) {
+    init(name: String, path: String, isDirectory: Bool, children: [FileItem]? = nil) {
+        self.id = path
         self.name = name
         self.path = path
         self.isDirectory = isDirectory
         self.children = children
-        self.isExpanded = isExpanded
-        self.isExcluded = isExcluded
-        self.includeComments = includeComments
-    }
-    
-    static func empty() -> FileItem {
-        FileItem(name: "", path: "", isDirectory: false)
     }
     
     static func == (lhs: FileItem, rhs: FileItem) -> Bool {
@@ -36,39 +26,16 @@ struct FileItem: Identifiable, Hashable {
     }
 }
 
-enum OutputFormat: String, CaseIterable {
-    case json
-    case text
-    case markdown
-    case html
-    case plainText
-    
-    var fileExtension: String {
-        switch self {
-        case .json: return "json"
-        case .text: return "txt"
-        case .markdown: return "md"
-        case .html: return "html"
-        case .plainText: return "txt"
-        }
-    }
-}
-
 struct Config {
     var showHiddenFiles: Bool = false
     var includeImages: Bool = true
     var includeComments: Bool = true
     var includeDependencies: Bool = true
     var includeTests: Bool = true
-    var outputFormat: OutputFormat = .markdown
 }
 
 @MainActor
 class FileSystemModel: ObservableObject {
-    struct Config {
-        var showHiddenFiles: Bool = false
-    }
-    
     @Published var config = Config() {
         didSet {
             if oldValue.showHiddenFiles != config.showHiddenFiles {
@@ -79,6 +46,7 @@ class FileSystemModel: ObservableObject {
     
     @Published var fileItems: [FileItem] = []
     @Published var selectedFiles: Set<FileItem> = []
+    @Published var currentItem: FileItem?
     @Published var savedSummaries: [SavedSummary] = []
     @Published var lastClickedFileName: String?
     @Published var lastClickedFilePath: String?
@@ -112,6 +80,8 @@ class FileSystemModel: ObservableObject {
     func loadDirectory(at url: URL) {
         rootPath = url.path
         refreshDirectory(showHidden: config.showHiddenFiles)
+        currentItem = nil
+        selectedFiles.removeAll()
     }
     
     private func updateImportsExports(for file: String, content: String) {
@@ -161,14 +131,12 @@ class FileSystemModel: ObservableObject {
                 var isDirectory: ObjCBool = false
                 
                 if fileManager.fileExists(atPath: fullPath, isDirectory: &isDirectory) {
+                    let filename = name.components(separatedBy: ".").first ?? ""
                     let item = FileItem(
-                        name: name,
+                        name: filename,
                         path: fullPath,
                         isDirectory: isDirectory.boolValue,
-                        children: isDirectory.boolValue ? listDirectory(fullPath, showHidden: showHidden) : nil,
-                        isExpanded: false,
-                        isExcluded: false,
-                        includeComments: true
+                        children: isDirectory.boolValue ? listDirectory(fullPath, showHidden: showHidden) : nil
                     )
                     items.append(item)
                     
@@ -193,21 +161,13 @@ class FileSystemModel: ObservableObject {
         }
     }
     
-    func toggleSelection(for item: FileItem) {
-        if selectedFiles.contains(item) {
-            selectedFiles.remove(item)
-        } else {
-            selectedFiles.insert(item)
-        }
-    }
-    
     func handleFileClick(_ item: FileItem) {
         guard !item.isDirectory else { return }
         
         lastClickedFileName = item.path
         lastClickedFilePath = item.path
         if let content = try? String(contentsOfFile: item.path) {
-            if item.includeComments {
+            if config.includeComments {
                 lastClickedFileContent = content
             } else {
                 lastClickedFileContent = stripComments(from: content)
@@ -550,10 +510,10 @@ class FileSystemModel: ObservableObject {
         return structure.isEmpty ? nil : structure
     }
     
-    func saveSummary(_ content: String, for fileName: String) {
+    func saveSummary(_ summary: String, for fileName: String) {
         let summary = SavedSummary(id: UUID().uuidString,
                                  fileName: fileName,
-                                 content: content,
+                                 content: summary,
                                  timestamp: Date())
         
         // Update or add the summary
@@ -569,219 +529,141 @@ class FileSystemModel: ObservableObject {
         }
     }
     
-    func loadSavedSummaries() {
+    func getSavedSummary(for fileName: String) -> String? {
+        return savedSummaries.first(where: { $0.fileName == fileName })?.content
+    }
+    
+    private func loadSavedSummaries() {
         if let data = UserDefaults.standard.data(forKey: "SavedSummaries"),
            let decoded = try? JSONDecoder().decode([SavedSummary].self, from: data) {
             savedSummaries = decoded
         }
     }
     
-    func getSavedSummary(for fileName: String) -> String? {
-        return savedSummaries.first(where: { $0.fileName == fileName })?.content
+    func toggleSelection(for item: FileItem) {
+        if selectedFiles.contains(item) {
+            selectedFiles.remove(item)
+        } else {
+            selectedFiles.insert(item)
+        }
+        objectWillChange.send()
     }
     
-    func generateExport(format: OutputFormat = .json) -> String {
-        var output = ""
-        let timestamp = ISO8601DateFormatter().string(from: Date())
+    func generateExport(for files: [FileItem], format: String) async {
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.text]
+        panel.nameFieldStringValue = "export-\(ISO8601DateFormatter().string(from: Date()))"
         
-        // Add header
-        switch format {
-        case .markdown:
-            output += "# Export \(timestamp)\n\n"
-        case .html:
-            output += """
-                <!DOCTYPE html>
-                <html>
-                <head>
-                    <title>Export \(timestamp)</title>
-                    <style>
-                        body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; }
-                        pre { background: #f5f5f5; padding: 1em; border-radius: 4px; }
-                    </style>
-                </head>
-                <body>
-                <h1>Export \(timestamp)</h1>
+        if panel.runModal() == .OK {
+            if let url = panel.url {
+                var content = ""
+                for file in files {
+                    if let fileContent = try? String(contentsOfFile: file.path, encoding: .utf8) {
+                        switch format {
+                        case "markdown":
+                            content += "# \(file.name)\n\n"
+                            if let summary = getSavedSummary(for: file.name) {
+                                content += summary + "\n\n"
+                            }
+                            content += "```\n\(fileContent)\n```\n\n"
+                        case "html":
+                            content += "<h1>\(file.name)</h1>\n"
+                            if let summary = getSavedSummary(for: file.name) {
+                                content += "<p>\(summary)</p>\n"
+                            }
+                            content += "<pre><code>\n\(fileContent)\n</code></pre>\n"
+                        case "plainText":
+                            content += "=== \(file.name) ===\n\n"
+                            if let summary = getSavedSummary(for: file.name) {
+                                content += summary + "\n\n"
+                            }
+                            content += fileContent + "\n\n"
+                        case "json":
+                            let fileData: [String: Any] = [
+                                "name": file.name,
+                                "path": file.path,
+                                "content": fileContent,
+                                "summary": getSavedSummary(for: file.name) ?? ""
+                            ]
+                            if let jsonData = try? JSONSerialization.data(withJSONObject: fileData),
+                               let jsonString = String(data: jsonData, encoding: .utf8) {
+                                content += jsonString + "\n"
+                            }
+                        case "text":
+                            content += "=== \(file.name) ===\n\n"
+                            if let summary = getSavedSummary(for: file.name) {
+                                content += summary + "\n\n"
+                            }
+                            content += fileContent + "\n\n"
+                        default:
+                            break
+                        }
+                    }
+                }
                 
-                """
-        case .plainText:
-            output += "Export \(timestamp)\n\n"
-        case .json:
-            output += "{\"timestamp\": \"\(timestamp)\", \"files\": ["
-        case .text:
-            output += "Export \(timestamp)\n\n"
-        }
-        
-        // Add file tree
-        switch format {
-        case .markdown:
-            output += "## Selected Files\n\n"
-            output += generateFileTree(for: selectedFiles)
-            output += "\n"
-        case .html:
-            output += "<h2>Selected Files</h2>\n<pre>\n"
-            output += generateFileTree(for: selectedFiles)
-                .replacingOccurrences(of: "<", with: "&lt;")
-                .replacingOccurrences(of: ">", with: "&gt;")
-            output += "</pre>\n"
-        case .plainText:
-            output += "Selected Files:\n\n"
-            output += generateFileTree(for: selectedFiles)
-            output += "\n"
-        case .json:
-            output += "\"fileTree\": \"\(generateFileTree(for: selectedFiles))\","
-        case .text:
-            output += "Selected Files:\n\n"
-            output += generateFileTree(for: selectedFiles)
-            output += "\n"
-        }
-        
-        // Add file contents with comment settings respected
-        switch format {
-        case .markdown:
-            output += "## File Contents\n\n"
-            for file in selectedFiles where !file.isDirectory {
-                output += "### \(file.name)\n\n"
-                if let content = try? String(contentsOfFile: file.path, encoding: .utf8) {
-                    let processedContent = showComments ? content : stripComments(from: content)
-                    output += "```\n\(processedContent)\n```\n\n"
-                }
-            }
-        case .html:
-            output += "<h2>File Contents</h2>\n"
-            for file in selectedFiles where !file.isDirectory {
-                output += "<h3>\(file.name)</h3>\n<pre>\n"
-                if let content = try? String(contentsOfFile: file.path, encoding: .utf8) {
-                    let processedContent = showComments ? content : stripComments(from: content)
-                    output += processedContent
-                        .replacingOccurrences(of: "<", with: "&lt;")
-                        .replacingOccurrences(of: ">", with: "&gt;")
-                }
-                output += "</pre>\n"
-            }
-        case .plainText:
-            output += "File Contents:\n\n"
-            for file in selectedFiles where !file.isDirectory {
-                output += "=== \(file.name) ===\n\n"
-                if let content = try? String(contentsOfFile: file.path, encoding: .utf8) {
-                    let processedContent = showComments ? content : stripComments(from: content)
-                    output += "\(processedContent)\n\n"
-                }
-            }
-        case .json:
-            output += "\"files\": ["
-            for file in selectedFiles where !file.isDirectory {
-                if let content = try? String(contentsOfFile: file.path, encoding: .utf8) {
-                    let processedContent = showComments ? content : stripComments(from: content)
-                    output += "{\"name\": \"\(file.name)\", \"content\": \"\(processedContent)\"},"
-                }
-            }
-            output = String(output.dropLast())
-            output += "]"
-        case .text:
-            output += "File Contents:\n\n"
-            for file in selectedFiles where !file.isDirectory {
-                output += "=== \(file.name) ===\n\n"
-                if let content = try? String(contentsOfFile: file.path, encoding: .utf8) {
-                    let processedContent = showComments ? content : stripComments(from: content)
-                    output += "\(processedContent)\n\n"
+                do {
+                    try content.write(to: url, atomically: true, encoding: .utf8)
+                } catch {
+                    print("Failed to write export: \(error)")
                 }
             }
         }
-        
-        // Add summaries
-        let includedSummaries = savedSummaries.filter { $0.isIncluded }
-        if !includedSummaries.isEmpty {
-            switch format {
-            case .markdown:
-                output += "## Summaries\n\n"
-                for summary in includedSummaries {
-                    output += "### \(summary.fileName)\n\n"
-                    output += summary.content
-                    output += "\n\n"
-                }
-            case .html:
-                output += "<h2>Summaries</h2>\n"
-                for summary in includedSummaries {
-                    output += "<h3>\(summary.fileName)</h3>\n"
-                    output += "<div class='summary'>\n"
-                    output += summary.content
-                        .replacingOccurrences(of: "<", with: "&lt;")
-                        .replacingOccurrences(of: ">", with: "&gt;")
-                        .replacingOccurrences(of: "\n", with: "<br>\n")
-                    output += "</div>\n"
-                }
-            case .plainText:
-                output += "Summaries:\n\n"
-                for summary in includedSummaries {
-                    output += "=== \(summary.fileName) ===\n\n"
-                    output += summary.content
-                    output += "\n\n"
-                }
-            case .json:
-                output += "\"summaries\": ["
-                for summary in includedSummaries {
-                    output += "{\"name\": \"\(summary.fileName)\", \"content\": \"\(summary.content)\"},"
-                }
-                output = String(output.dropLast())
-                output += "]"
-            case .text:
-                output += "Summaries:\n\n"
-                for summary in includedSummaries {
-                    output += "=== \(summary.fileName) ===\n\n"
-                    output += summary.content
-                    output += "\n\n"
-                }
-            }
-        }
-        
-        if format == .html {
-            output += "</body></html>"
-        } else if format == .json {
-            output += "}"
-        }
-        
-        return output
     }
     
-    private func generateFileTree(for items: Set<FileItem>) -> String {
+    func generateFileTree(for items: Set<FileItem>) -> String {
         let sortedItems = items.sorted { $0.name < $1.name }
         return sortedItems.map { item in
             var output = "- \(item.name)\n"
-            if item.isDirectory, let children = item.children {
-                let childItems = Set(children)
+            if let children = item.children {
+                let childItems = children
                 output += childItems.map { "  \($0.name)" }.joined(separator: "\n")
                 output += "\n"
             }
             return output
-        }
-        .joined()
+        }.joined()
     }
     
     public func stripComments(from content: String) -> String {
-        var result = content
+        var result = ""
+        var inMultilineComment = false
+        var inSinglelineComment = false
+        var inString = false
+        var previousChar: Character?
         
-        // Remove single-line comments
-        let singleLinePattern = "\\/\\/.*$"
-        if let regex = try? NSRegularExpression(pattern: singleLinePattern, options: .anchorsMatchLines) {
-            result = regex.stringByReplacingMatches(in: result,
-                                                  options: [],
-                                                  range: NSRange(result.startIndex..., in: result),
-                                                  withTemplate: "")
+        for char in content {
+            if inString {
+                result.append(char)
+                if char == "\"" && previousChar != "\\" {
+                    inString = false
+                }
+            } else if inMultilineComment {
+                if char == "/" && previousChar == "*" {
+                    inMultilineComment = false
+                    previousChar = nil
+                    continue
+                }
+            } else if inSinglelineComment {
+                if char == "\n" {
+                    inSinglelineComment = false
+                    result.append(char)
+                }
+            } else {
+                if char == "/" && previousChar == "/" {
+                    result.removeLast()
+                    inSinglelineComment = true
+                } else if char == "*" && previousChar == "/" {
+                    result.removeLast()
+                    inMultilineComment = true
+                } else if char == "\"" {
+                    inString = true
+                    result.append(char)
+                } else {
+                    result.append(char)
+                }
+            }
+            
+            previousChar = char
         }
-        
-        // Remove multi-line comments
-        let multiLinePattern = "\\/\\*[\\s\\S]*?\\*\\/"
-        if let regex = try? NSRegularExpression(pattern: multiLinePattern, options: []) {
-            result = regex.stringByReplacingMatches(in: result,
-                                                  options: [],
-                                                  range: NSRange(result.startIndex..., in: result),
-                                                  withTemplate: "")
-        }
-        
-        // Remove empty lines and normalize spacing
-        result = result.components(separatedBy: .newlines)
-            .filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
-            .joined(separator: "\n")
         
         return result
     }
@@ -828,5 +710,79 @@ class FileSystemModel: ObservableObject {
             """
         
         return summary
+    }
+    
+    func generateDirectorySummary(for item: FileItem) async -> String? {
+        guard item.isDirectory else { return nil }
+        
+        var summary = "# Directory: \(item.name)\n\n"
+        
+        // Basic stats
+        let fileManager = FileManager.default
+        var totalFiles = 0
+        var totalDirectories = 0
+        var totalSize: Int64 = 0
+        var fileTypes = Set<String>()
+        
+        func processItem(_ item: FileItem) {
+            if item.isDirectory {
+                totalDirectories += 1
+                if let children = item.children {
+                    children.forEach { processItem($0) }
+                }
+            } else {
+                totalFiles += 1
+                if let fileSize = try? fileManager.attributesOfItem(atPath: item.path)[.size] as? Int64 {
+                    totalSize += fileSize
+                }
+                fileTypes.insert(item.name.components(separatedBy: ".").last?.lowercased() ?? "")
+            }
+        }
+        
+        processItem(item)
+        
+        // Format size
+        let formatter = ByteCountFormatter()
+        formatter.allowedUnits = [.useKB, .useMB, .useGB]
+        formatter.countStyle = .file
+        let sizeString = formatter.string(fromByteCount: totalSize)
+        
+        summary += "## Statistics\n"
+        summary += "- Total Files: \(totalFiles)\n"
+        summary += "- Total Directories: \(totalDirectories)\n"
+        summary += "- Total Size: \(sizeString)\n"
+        summary += "- File Types: \(fileTypes.sorted().joined(separator: ", "))\n\n"
+        
+        // Contents overview
+        summary += "## Contents\n"
+        if let children = item.children {
+            for child in children.sorted(by: { $0.name < $1.name }) {
+                let icon = child.isDirectory ? "📁" : "📄"
+                summary += "\(icon) \(child.name)\n"
+            }
+        }
+        
+        return summary
+    }
+    
+    @MainActor
+    func selectRootDirectory() async {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        
+        if panel.runModal() == .OK {
+            if let url = panel.url {
+                loadDirectory(at: url)
+            }
+        }
+    }
+    
+    @MainActor
+    func openLastDirectory() async {
+        if let path = UserDefaults.standard.string(forKey: "lastRootPath") {
+            loadDirectory(at: URL(fileURLWithPath: path))
+        }
     }
 }

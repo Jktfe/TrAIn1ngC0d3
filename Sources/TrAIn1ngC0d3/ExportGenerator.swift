@@ -6,9 +6,9 @@ import AppKit
 @MainActor
 class ExportGenerator {
     private let model: FileSystemModel
-    private let outputFormat: OutputFormat
+    private let outputFormat: String
     
-    init(model: FileSystemModel, outputFormat: OutputFormat) {
+    init(model: FileSystemModel, outputFormat: String) {
         self.model = model
         self.outputFormat = outputFormat
     }
@@ -41,6 +41,66 @@ class ExportGenerator {
             content += "\n\n"
         }
         
+        switch outputFormat {
+        case "markdown":
+            for file in files {
+                if let fileContent = try? String(contentsOfFile: file.path, encoding: .utf8) {
+                    content += "# \(file.name)\n\n"
+                    if let summary = model.getSavedSummary(for: file.name) {
+                        content += summary + "\n\n"
+                    }
+                    content += "```\n\(fileContent)\n```\n\n"
+                }
+            }
+        case "html":
+            for file in files {
+                if let fileContent = try? String(contentsOfFile: file.path, encoding: .utf8) {
+                    content += "<h1>\(file.name)</h1>\n"
+                    if let summary = model.getSavedSummary(for: file.name) {
+                        content += "<p>\(summary)</p>\n"
+                    }
+                    content += "<pre><code>\n\(fileContent)\n</code></pre>\n"
+                }
+            }
+        case "plainText":
+            for file in files {
+                if let fileContent = try? String(contentsOfFile: file.path, encoding: .utf8) {
+                    content += "=== \(file.name) ===\n\n"
+                    if let summary = model.getSavedSummary(for: file.name) {
+                        content += summary + "\n\n"
+                    }
+                    content += fileContent + "\n\n"
+                }
+            }
+        case "json":
+            for file in files {
+                if let fileContent = try? String(contentsOfFile: file.path, encoding: .utf8) {
+                    let fileData: [String: Any] = [
+                        "name": file.name,
+                        "path": file.path,
+                        "content": fileContent,
+                        "summary": model.getSavedSummary(for: file.name) ?? ""
+                    ]
+                    if let jsonData = try? JSONSerialization.data(withJSONObject: fileData),
+                       let jsonString = String(data: jsonData, encoding: .utf8) {
+                        content += jsonString + "\n"
+                    }
+                }
+            }
+        case "text":
+            for file in files {
+                if let fileContent = try? String(contentsOfFile: file.path, encoding: .utf8) {
+                    content += "=== \(file.name) ===\n\n"
+                    if let summary = model.getSavedSummary(for: file.name) {
+                        content += summary + "\n\n"
+                    }
+                    content += fileContent + "\n\n"
+                }
+            }
+        default:
+            break
+        }
+        
         return content
     }
     
@@ -51,7 +111,7 @@ class ExportGenerator {
         
         let fileManager = FileManager.default
         let tempDir = fileManager.temporaryDirectory
-        let fileName = "export-\(timestamp).\(outputFormat.fileExtension)"
+        let fileName = "export-\(timestamp).\(outputFormat)"
         let fileURL = tempDir.appendingPathComponent(fileName)
         
         do {
